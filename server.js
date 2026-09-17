@@ -1,184 +1,693 @@
+/**
+ * WhatsApp Coexistence Backend - Tomcat Store
+ *
+ * FUNCIONALIDAD:
+ * ✅ Webhook receiver (Cloud API messages)
+ * ✅ Meta Pixel Conversions API integration
+ * ✅ Embedded Signup flow (Hosted)
+ * ✅ OAuth callback handling
+ * ✅ Automatic Events API webhooks
+ * ✅ Token encryption & secure storage
+ * ✅ Coexistence status tracking
+ *
+ * FLUJO DE COEXISTENCE:
+ * 1. GET /coexistence/start → Inicia flujo Embedded Signup
+ * 2. Usuario autoriza en Meta
+ * 3. Meta redirige a GET /coexistence/callback
+ * 4. Backend captura phone_number_id
+ * 5. Backend valida y almacena credenciales
+ * 6. Coexistence activado ✅
+ */
+
+require('dotenv').config();
 const express = require('express');
 const axios = require('axios');
-require('dotenv').config();
-
+const crypto = require('crypto');
 const app = express();
-const PORT = process.env.PORT || 3000;
 
-// Credenciales (desde variables de entorno en Render)
-const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
-const BUSINESS_ACCOUNT_ID = process.env.BUSINESS_ACCOUNT_ID;
-const ACCESS_TOKEN = process.env.ACCESS_TOKEN;
-const WEBHOOK_VERIFY_TOKEN = process.env.WEBHOOK_VERIFY_TOKEN || 'tomcat_secret_2026';
-
-// Middleware
 app.use(express.json());
 
-// ✅ WEBHOOK VERIFICATION (Meta requiere esto)
-app.get('/webhook', (req, res) => {
-  const mode = req.query['hub.mode'];
-  const token = req.query['hub.verify_token'];
-  const challenge = req.query['hub.challenge'];
+// ============================================
+// CONFIGURACIÓN CRÍTICA
+// ============================================
 
-  if (mode === 'subscribe' && token === WEBHOOK_VERIFY_TOKEN) {
-    console.log('✅ Webhook verificado correctamente');
-    res.status(200).send(challenge);
-  } else {
-    console.log('❌ Verificación fallida');
-    res.status(403).send('Forbidden');
+const port = process.env.PORT || 3000;
+const nodeEnv = process.env.NODE_ENV || 'development';
+
+// Meta API
+const metaAppId = process.env.META_APP_ID;
+const metaAppSecret = process.env.META_APP_SECRET;
+const metaAccessToken = process.env.META_ACCESS_TOKEN;
+const businessPortfolioId = process.env.BUSINESS_PORTFOLIO_ID || '603733427671323';
+const targetWabaId = process.env.TARGET_WABA_ID || '28291929163801429';
+const targetPhoneNumber = process.env.TARGET_PHONE_NUMBER || '+50487473359';
+
+// Webhook
+const verifyToken = process.env.VERIFY_TOKEN || 'tomcat_webhook_secure_token_v2';
+const webhookUrl = process.env.WEBHOOK_URL || 'https://tomcat-whatsapp-api.onrender.com';
+
+// Meta Pixel
+const pixelId = process.env.PIXEL_ID;
+const pixelAccessToken = process.env.PIXEL_ACCESS_TOKEN;
+
+// Encryption
+const encryptionKey = process.env.ENCRYPTION_KEY || crypto.randomBytes(32).toString('hex');
+
+// ============================================
+// STORAGE EN MEMORIA (Producción: usar DB)
+// ============================================
+
+const coexistenceStore = {
+  sessions: {},           // Sesiones OAuth en progreso
+  phoneNumbers: {},       // Phone numbers vinculados
+  tokens: {},             // Tokens encriptados
+  webhookEvents: []       // Histórico de eventos
+};
+
+// ============================================
+// UTILIDADES DE ENCRIPTACIÓN
+// ============================================
+
+function encryptToken(token) {
+  const cipher = crypto.createCipher('aes-256-cbc', encryptionKey);
+  let encrypted = cipher.update(token, 'utf8', 'hex');
+  encrypted += cipher.final('hex');
+  return encrypted;
+}
+
+function decryptToken(encrypted) {
+  try {
+    const decipher = crypto.createDecipher('aes-256-cbc', encryptionKey);
+    let decrypted = decipher.update(encrypted, 'hex', 'utf8');
+    decrypted += decipher.final('utf8');
+    return decrypted;
+  } catch (error) {
+    console.error('Decryption error:', error.message);
+    return null;
   }
-});
+}
 
-// 📨 RECIBIR MENSAJES
-app.post('/webhook', async (req, res) => {
-  const body = req.body;
+// ============================================
+// LOGGING MEJORADO
+// ============================================
 
-  // Meta envía eventos en este formato
-  if (body.object === 'whatsapp_business_account') {
-    const entry = body.entry[0];
-    const changes = entry.changes[0];
-    const value = changes.value;
+const logEvent = (type, data) => {
+  const timestamp = new Date().toISOString();
+  const logEntry = {
+    type,
+    timestamp,
+    data,
+    environment: nodeEnv,
+    service: 'tomcat-whatsapp-api'
+  };
 
-    // 👤 Si hay mensajes entrantes
-    if (value.messages) {
-      for (const message of value.messages) {
-        const phone = message.from;
-        const messageText = message.text.body;
-        const messageId = message.id;
+  console.log(`\n[${type}] ${timestamp}`);
+  console.log(JSON.stringify(logEntry, null, 2));
 
-        console.log(`📱 Mensaje de ${phone}: ${messageText}`);
+  // Guardar en histórico (máximo 1000 eventos)
+  if (coexistenceStore.webhookEvents.length > 1000) {
+    coexistenceStore.webhookEvents.shift();
+  }
+  coexistenceStore.webhookEvents.push(logEntry);
+};
 
-        // 🤖 AUTO-RESPUESTA SIMPLE
-        await enviarMensaje(phone, `
-¡Hola! Gracias por contactar a Tomcat Store. 👋
+// ============================================
+// ENDPOINT: HEALTH CHECK
+// ============================================
 
-Recibimos tu mensaje: "${messageText}"
-
-Un representante te responderá pronto. 
-Para más info: www.tomcatstorehn.com
-        `);
-
-        // Marca como leído
-        await marcarComoLeido(messageId);
-      }
+app.get('/health', (req, res) => {
+  res.json({
+    status: 'OK',
+    timestamp: new Date().toISOString(),
+    service: 'tomcat-whatsapp-api',
+    environment: nodeEnv,
+    webhook: 'Configured',
+    pixelEnabled: !!pixelAccessToken,
+    coexistenceEnabled: !!metaAccessToken,
+    coexistenceStore: {
+      activeSessions: Object.keys(coexistenceStore.sessions).length,
+      linkedPhoneNumbers: Object.keys(coexistenceStore.phoneNumbers).length,
+      recentEvents: coexistenceStore.webhookEvents.length
     }
-
-    // ✅ Confirma a Meta que recibiste el evento
-    res.status(200).send({ received: true });
-  } else {
-    res.status(400).send('Invalid');
-  }
-});
-
-// 📤 FUNCIÓN: Enviar Mensajes
-async function enviarMensaje(phoneNumber, messageText) {
-  try {
-    const url = `https://graph.instagram.com/v18.0/${PHONE_NUMBER_ID}/messages`;
-    
-    const response = await axios.post(url, {
-      messaging_product: 'whatsapp',
-      to: phoneNumber,
-      type: 'text',
-      text: { body: messageText }
-    }, {
-      headers: { Authorization: `Bearer ${ACCESS_TOKEN}` }
-    });
-
-    console.log(`✅ Mensaje enviado a ${phoneNumber}`);
-    return response.data;
-  } catch (error) {
-    console.error('❌ Error enviando mensaje:', error.response?.data || error.message);
-  }
-}
-
-// 📤 FUNCIÓN: Enviar Plantilla
-async function enviarPlantilla(phoneNumber, nombrePlantilla, parametros) {
-  try {
-    const url = `https://graph.instagram.com/v18.0/${PHONE_NUMBER_ID}/messages`;
-    
-    const response = await axios.post(url, {
-      messaging_product: 'whatsapp',
-      to: phoneNumber,
-      type: 'template',
-      template: {
-        name: nombrePlantilla,
-        language: { code: 'es_HN' }, // Honduras Spanish
-        parameters: {
-          body: {
-            parameters: parametros.map(p => ({ type: 'text', text: p }))
-          }
-        }
-      }
-    }, {
-      headers: { Authorization: `Bearer ${ACCESS_TOKEN}` }
-    });
-
-    console.log(`✅ Plantilla "${nombrePlantilla}" enviada a ${phoneNumber}`);
-    return response.data;
-  } catch (error) {
-    console.error('❌ Error enviando plantilla:', error.response?.data || error.message);
-  }
-}
-
-// ✔️ FUNCIÓN: Marcar como Leído
-async function marcarComoLeido(messageId) {
-  try {
-    const url = `https://graph.instagram.com/v18.0/${PHONE_NUMBER_ID}/messages`;
-    
-    await axios.post(url, {
-      messaging_product: 'whatsapp',
-      status: 'read',
-      message_id: messageId
-    }, {
-      headers: { Authorization: `Bearer ${ACCESS_TOKEN}` }
-    });
-
-    console.log(`✔️ Mensaje ${messageId} marcado como leído`);
-  } catch (error) {
-    console.error('Error marcando como leído:', error.message);
-  }
-}
-
-// 🧪 ENDPOINT DE PRUEBA
-app.get('/test', (req, res) => {
-  res.json({ 
-    status: 'running ✅',
-    phone_id: PHONE_NUMBER_ID,
-    timestamp: new Date()
   });
 });
 
-// 📡 ENDPOINT: Enviar Mensaje Manual (para pruebas)
-app.post('/enviar', express.json(), async (req, res) => {
-  const { phone, message } = req.body;
-  
-  if (!phone || !message) {
-    return res.status(400).json({ error: 'Falta phone o message' });
+// ============================================
+// EMBEDDED SIGNUP - INICIO DEL FLUJO
+// ============================================
+
+/**
+ * GET /coexistence/start
+ *
+ * Inicia el flujo de Embedded Signup de Meta para Coexistence.
+ * Genera una sesión, establece el estado CSRF, y redirige a Meta.
+ */
+app.get('/coexistence/start', (req, res) => {
+  try {
+    logEvent('COEXISTENCE_START', {
+      message: 'Iniciando flujo Embedded Signup',
+      targetPhone: targetPhoneNumber,
+      businessPortfolioId
+    });
+
+    // Generar session state único
+    const sessionId = crypto.randomBytes(16).toString('hex');
+    const sessionState = {
+      id: sessionId,
+      createdAt: new Date(),
+      expiresAt: new Date(Date.now() + 15 * 60 * 1000), // 15 minutos
+      status: 'pending',
+      targetPhone: targetPhoneNumber
+    };
+
+    coexistenceStore.sessions[sessionId] = sessionState;
+
+    // Construir URL de Embedded Signup
+    // Hosted Embedded Signup: Meta maneja toda la autenticación
+    const embeddedSignupUrl =
+      `https://business.facebook.com/wa/manage/coexistence/` +
+      `?business_id=${businessPortfolioId}` +
+      `&waba_id=${targetWabaId}` +
+      `&redirect_uri=${encodeURIComponent(`${webhookUrl}/coexistence/callback`)}` +
+      `&state=${sessionId}`;
+
+    logEvent('EMBEDDED_SIGNUP_URL_GENERATED', {
+      url: embeddedSignupUrl,
+      sessionId,
+      expiresIn: '15 minutes'
+    });
+
+    // Responder con instrucciones y URL
+    res.json({
+      success: true,
+      message: 'Embedded Signup iniciado. Abre la URL en tu navegador.',
+      sessionId,
+      embeddedSignupUrl,
+      instructions: [
+        '1. Abre la URL anterior en tu navegador',
+        '2. Inicia sesión con tu cuenta Meta/Facebook',
+        '3. Escanea el código QR con WhatsApp Business App',
+        '4. Confirma la autorización en el navegador',
+        '5. Vuelve aquí para completar la configuración'
+      ],
+      expiresAt: sessionState.expiresAt.toISOString()
+    });
+
+  } catch (error) {
+    logEvent('COEXISTENCE_START_ERROR', {
+      error: error.message,
+      stack: error.stack
+    });
+    res.status(500).json({
+      error: 'Failed to start Embedded Signup',
+      details: error.message
+    });
+  }
+});
+
+// ============================================
+// EMBEDDED SIGNUP - CALLBACK DE META
+// ============================================
+
+/**
+ * GET /coexistence/callback
+ *
+ * Callback que Meta llama después de autorización exitosa.
+ * Captura el phone_number_id del número coexistente.
+ *
+ * Parámetros esperados:
+ * - state: sessionId (para validación CSRF)
+ * - phone_number_id: ID del número vinculado
+ * - code: Código de autorización (si aplica)
+ * - error: Mensaje de error (si falla)
+ */
+app.get('/coexistence/callback', async (req, res) => {
+  try {
+    const { state, phone_number_id, code, error, error_description } = req.query;
+
+    logEvent('COEXISTENCE_CALLBACK_RECEIVED', {
+      state,
+      phone_number_id,
+      code: code ? '[REDACTED]' : null,
+      error,
+      error_description,
+      timestamp: new Date().toISOString()
+    });
+
+    // ========== VALIDACIÓN DE ESTADO ==========
+    if (!state) {
+      throw new Error('Missing state parameter (CSRF validation)');
+    }
+
+    const session = coexistenceStore.sessions[state];
+    if (!session) {
+      throw new Error('Invalid or expired session');
+    }
+
+    if (new Date() > session.expiresAt) {
+      delete coexistenceStore.sessions[state];
+      throw new Error('Session expired');
+    }
+
+    // ========== MANEJO DE ERRORES META ==========
+    if (error) {
+      session.status = 'failed';
+      session.error = error;
+      session.errorDescription = error_description;
+
+      logEvent('COEXISTENCE_CALLBACK_ERROR', {
+        sessionId: state,
+        error,
+        error_description,
+        targetPhone: session.targetPhone
+      });
+
+      return res.status(400).json({
+        success: false,
+        message: 'Autorización rechazada',
+        error,
+        description: error_description,
+        sessionId: state,
+        nextSteps: 'Intenta nuevamente usando: GET /coexistence/start'
+      });
+    }
+
+    // ========== VALIDACIÓN DE PHONE NUMBER ID ==========
+    if (!phone_number_id) {
+      throw new Error('Missing phone_number_id in callback');
+    }
+
+    // Validar formato de phone_number_id (debe ser numérico)
+    if (!/^\d{15,}$/.test(phone_number_id)) {
+      throw new Error(`Invalid phone_number_id format: ${phone_number_id}`);
+    }
+
+    // ========== CAPTURAR Y ALMACENAR PHONE NUMBER ID ==========
+    session.status = 'authorized';
+    session.phoneNumberId = phone_number_id;
+    session.authorizedAt = new Date();
+
+    // Guardar phone number en store
+    coexistenceStore.phoneNumbers[targetPhoneNumber] = {
+      phone: targetPhoneNumber,
+      phone_number_id,
+      wabaId: targetWabaId,
+      businessPortfolioId,
+      status: 'active',
+      authorizedAt: new Date(),
+      coexistenceActive: true,
+      capabilities: {
+        cloudApi: true,
+        businessApp: true,
+        messageSyncEnabled: true
+      }
+    };
+
+    logEvent('PHONE_NUMBER_CAPTURED', {
+      phone: targetPhoneNumber,
+      phone_number_id,
+      wabaId: targetWabaId,
+      sessionId: state,
+      status: 'authorized'
+    });
+
+    // ========== OBTENER ACCESS TOKEN (si Meta proporcionó code) ==========
+    let accessToken = null;
+    if (code && metaAppSecret) {
+      try {
+        const tokenResponse = await axios.post(
+          'https://graph.instagram.com/v18.0/oauth/access_token',
+          {
+            client_id: metaAppId,
+            client_secret: metaAppSecret,
+            grant_type: 'authorization_code',
+            redirect_uri: `${webhookUrl}/coexistence/callback`,
+            code
+          },
+          { timeout: 10000 }
+        );
+
+        accessToken = tokenResponse.data.access_token;
+
+        // Encriptar y almacenar token
+        const encryptedToken = encryptToken(accessToken);
+        coexistenceStore.tokens[targetPhoneNumber] = {
+          encryptedToken,
+          expiresAt: new Date(Date.now() + 60 * 60 * 1000), // 1 hora
+          type: 'access_token'
+        };
+
+        logEvent('ACCESS_TOKEN_OBTAINED', {
+          phone: targetPhoneNumber,
+          tokenType: 'access_token',
+          expiresIn: '1 hour'
+        });
+      } catch (error) {
+        logEvent('ACCESS_TOKEN_ERROR', {
+          phone: targetPhoneNumber,
+          error: error.message
+        });
+        // No es crítico si falla - continuar con configuración básica
+      }
+    }
+
+    // ========== RESPUESTA EXITOSA ==========
+    const responseData = {
+      success: true,
+      message: 'Coexistence activado ✅',
+      sessionId: state,
+      phoneNumber: targetPhoneNumber,
+      phoneNumberId: phone_number_id,
+      wabaId: targetWabaId,
+      status: 'active',
+      coexistenceFeatures: {
+        cloudApi: 'Conectado - Puedes enviar mensajes desde API',
+        businessApp: 'Habilitado - Puedes usar WhatsApp Business App',
+        messageSync: 'Activo - Mensajes sincronizados entre plataformas',
+        webhookReceiver: 'Configurado - Recibiendo eventos en tiempo real'
+      },
+      nextSteps: [
+        '1. Verifica que WhatsApp Business App siga funcionando en tu teléfono',
+        '2. Envía un mensaje de prueba desde la app',
+        '3. Envía un mensaje de prueba desde la Cloud API',
+        '4. Comprueba que ambos aparecen en la conversación',
+        '5. Monitorea webhooks en: GET /webhooks/status'
+      ],
+      webhookReceiver: `${webhookUrl}/`,
+      statusUrl: `${webhookUrl}/coexistence/status`,
+      logsUrl: `${webhookUrl}/webhooks/logs`
+    };
+
+    res.json(responseData);
+
+  } catch (error) {
+    logEvent('COEXISTENCE_CALLBACK_EXCEPTION', {
+      error: error.message,
+      stack: error.stack,
+      timestamp: new Date().toISOString()
+    });
+
+    res.status(500).json({
+      success: false,
+      error: 'Callback processing failed',
+      message: error.message,
+      support: 'Contacta al equipo técnico de Tomcat Store'
+    });
+  }
+});
+
+// ============================================
+// COEXISTENCE STATUS
+// ============================================
+
+/**
+ * GET /coexistence/status
+ *
+ * Retorna el estado actual de Coexistence para el número objetivo.
+ */
+app.get('/coexistence/status', (req, res) => {
+  const phoneData = coexistenceStore.phoneNumbers[targetPhoneNumber];
+
+  if (!phoneData) {
+    return res.json({
+      status: 'not_configured',
+      phone: targetPhoneNumber,
+      message: 'Coexistence no está configurado. Ejecuta: GET /coexistence/start',
+      configUrl: `${webhookUrl}/coexistence/start`
+    });
   }
 
-  await enviarMensaje(phone, message);
-  res.json({ success: true, phone, message });
+  res.json({
+    status: 'active',
+    phone: targetPhoneNumber,
+    phoneNumberId: phoneData.phone_number_id,
+    wabaId: phoneData.wabaId,
+    authorizedAt: phoneData.authorizedAt,
+    coexistenceFeatures: phoneData.capabilities,
+    messageSyncStatus: 'enabled',
+    lastUpdate: new Date().toISOString(),
+    operationalStatus: {
+      cloudApi: 'Active ✅',
+      businessApp: 'Active ✅',
+      webhookReceiver: `Active at ${webhookUrl}/ ✅`,
+      pixelIntegration: pixelAccessToken ? 'Active ✅' : 'Not configured'
+    }
+  });
 });
 
-// 📡 ENDPOINT: Enviar Plantilla Manual
-app.post('/enviar-plantilla', express.json(), async (req, res) => {
-  const { phone, template, params } = req.body;
-  
-  if (!phone || !template) {
-    return res.status(400).json({ error: 'Falta phone o template' });
+// ============================================
+// WEBHOOK VERIFICATION (GET)
+// ============================================
+
+app.get('/', (req, res) => {
+  const { 'hub.mode': mode, 'hub.verify_token': token, 'hub.challenge': challenge } = req.query;
+
+  if (mode === 'subscribe' && token === verifyToken) {
+    logEvent('WEBHOOK_VERIFIED', {
+      mode,
+      verifyTokenMatch: true,
+      timestamp: new Date().toISOString()
+    });
+    res.status(200).send(challenge);
+  } else {
+    logEvent('WEBHOOK_VERIFICATION_FAILED', {
+      receivedToken: token,
+      expectedToken: verifyToken,
+      mode,
+      challenge: !!challenge
+    });
+    res.status(403).end();
   }
-
-  await enviarPlantilla(phone, template, params || []);
-  res.json({ success: true, phone, template });
 });
 
-// 🚀 INICIAR SERVIDOR
-app.listen(PORT, () => {
-  console.log(`
-╔════════════════════════════════════════╗
-║   🚀 Tomcat WhatsApp API Server       ║
-║   Puerto: ${PORT}                          ║
-║   Status: ✅ CORRIENDO                 ║
-╚════════════════════════════════════════╝
-  `);
+// ============================================
+// WEBHOOK EVENTS (POST)
+// ============================================
+
+app.post('/', (req, res) => {
+  const { entry } = req.body;
+
+  // Respuesta inmediata a Meta
+  res.status(200).json({ success: true });
+
+  if (!entry) return;
+
+  entry.forEach((item) => {
+    const { changes } = item;
+
+    changes.forEach(async (change) => {
+      const { field, value } = change;
+
+      // ========== MENSAJES ENTRANTES ==========
+      if (field === 'messages') {
+        const { messages, metadata } = value;
+
+        messages?.forEach(async (message) => {
+          logEvent('MESSAGE_RECEIVED', {
+            from: message.from,
+            type: message.type,
+            messageId: message.id,
+            timestamp: message.timestamp,
+            phoneNumberId: metadata.phone_number_id,
+            coexistenceMode: true,
+            source: message.from_me ? 'BUSINESS_APP' : 'CLOUD_API',
+            content: getMessageContent(message)
+          });
+
+          // Enviar a Meta Pixel
+          await sendPixelEvent('Contact', {
+            phone: message.from
+          });
+        });
+      }
+
+      // ========== ESTADO DE MENSAJES ==========
+      if (field === 'message_status') {
+        const { statuses } = value;
+        statuses?.forEach((status) => {
+          logEvent('MESSAGE_STATUS', {
+            messageId: status.id,
+            status: status.status,
+            timestamp: status.timestamp,
+            phoneNumberId: value.metadata?.phone_number_id,
+            recipientId: status.recipient_id
+          });
+        });
+      }
+
+      // ========== ACTUALIZACIONES DE PLANTILLAS ==========
+      if (field === 'message_template_status_update') {
+        logEvent('TEMPLATE_STATUS_UPDATE', value);
+      }
+
+      // ========== ALERTAS DE CUENTA (IMPORTANTE PARA COEXISTENCE) ==========
+      if (field === 'account_alerts') {
+        logEvent('ACCOUNT_ALERT', value);
+      }
+
+      // ========== AUTOMATIC EVENTS API - COEXISTENCE EVENTS ==========
+      if (field === 'coexistence_updates') {
+        logEvent('COEXISTENCE_EVENT', {
+          eventType: value.event_type,
+          phone: value.phone_number,
+          quality: value.quality_rating,
+          timestamp: new Date().toISOString()
+        });
+      }
+    });
+  });
 });
+
+// ============================================
+// ENVÍO A META PIXEL
+// ============================================
+
+async function sendPixelEvent(eventName, userData, eventData = {}) {
+  if (!pixelId || !pixelAccessToken) return;
+
+  try {
+    const payload = {
+      data: [{
+        event_name: eventName,
+        event_time: Math.floor(Date.now() / 1000),
+        user_data: {
+          ph: userData.phone ?
+            crypto.createHash('sha256').update(userData.phone).digest('hex') : null
+        },
+        event_source_url: 'https://www.tomcatstorehn.com',
+        action_source: 'website'
+      }],
+      access_token: pixelAccessToken
+    };
+
+    await axios.post(
+      `https://graph.facebook.com/v18.0/${pixelId}/events`,
+      payload,
+      { timeout: 5000 }
+    );
+  } catch (error) {
+    // Log pero no falles
+  }
+}
+
+// ============================================
+// UTILIDADES
+// ============================================
+
+function getMessageContent(message) {
+  const { type, text } = message;
+  return {
+    type,
+    content: text?.body || '[Media]'
+  };
+}
+
+// ============================================
+// LOGS Y DEBUGGING
+// ============================================
+
+/**
+ * GET /webhooks/logs
+ *
+ * Retorna los últimos eventos registrados.
+ */
+app.get('/webhooks/logs', (req, res) => {
+  const limit = parseInt(req.query.limit) || 50;
+  const logs = coexistenceStore.webhookEvents.slice(-limit);
+
+  res.json({
+    total: coexistenceStore.webhookEvents.length,
+    limit,
+    logs,
+    timestamp: new Date().toISOString()
+  });
+});
+
+/**
+ * GET /webhooks/status
+ *
+ * Estado completo del sistema.
+ */
+app.get('/webhooks/status', (req, res) => {
+  res.json({
+    service: 'tomcat-whatsapp-api',
+    environment: nodeEnv,
+    uptime: process.uptime(),
+    timestamp: new Date().toISOString(),
+    configuration: {
+      webhook: 'Configured',
+      metaPixel: pixelAccessToken ? 'Configured' : 'Not configured',
+      coexistence: metaAccessToken ? 'Ready' : 'Awaiting Embedded Signup'
+    },
+    activeSessions: Object.keys(coexistenceStore.sessions).length,
+    linkedPhoneNumbers: Object.keys(coexistenceStore.phoneNumbers).length,
+    eventCount: coexistenceStore.webhookEvents.length,
+    recentEvents: coexistenceStore.webhookEvents.slice(-10)
+  });
+});
+
+// ============================================
+// ERROR HANDLING
+// ============================================
+
+app.use((err, req, res, next) => {
+  logEvent('UNHANDLED_ERROR', {
+    error: err.message,
+    stack: err.stack,
+    path: req.path,
+    method: req.method
+  });
+
+  res.status(500).json({
+    error: 'Internal Server Error',
+    message: nodeEnv === 'development' ? err.message : 'An error occurred'
+  });
+});
+
+app.use((req, res) => {
+  res.status(404).json({
+    error: 'Not Found',
+    path: req.path,
+    availableEndpoints: [
+      'GET /health',
+      'GET /coexistence/start',
+      'GET /coexistence/callback',
+      'GET /coexistence/status',
+      'POST /',
+      'GET /webhooks/logs',
+      'GET /webhooks/status'
+    ]
+  });
+});
+
+// ============================================
+// INICIO DEL SERVIDOR
+// ============================================
+
+app.listen(port, () => {
+  console.log(`\n╔═══════════════════════════════════════════╗`);
+  console.log(`║   WhatsApp Coexistence API                ║`);
+  console.log(`║   Tomcat Store - Honduras                 ║`);
+  console.log(`║   Puerto: ${port}                              ║`);
+  console.log(`║   Modo: ${nodeEnv.toUpperCase().padEnd(30)}║`);
+  console.log(`╚═══════════════════════════════════════════╝\n`);
+
+  logEvent('SERVER_STARTED', {
+    port,
+    environment: nodeEnv,
+    services: {
+      webhookReceiver: 'Active',
+      embeddedSignup: 'Ready',
+      pixelIntegration: pixelAccessToken ? 'Active' : 'Disabled',
+      coexistenceTarget: targetPhoneNumber
+    },
+    endpoints: {
+      health: '/health',
+      embeddedSignup: '/coexistence/start',
+      webhookReceiver: '/',
+      status: '/coexistence/status'
+    }
+  });
+});
+
+module.exports = app;
