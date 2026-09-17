@@ -1,4 +1,5 @@
 /**
+ * Version: 2.0.1 - Critical bugfix for routing
  * WhatsApp Coexistence Backend - Tomcat Store
  *
  * FUNCIONALIDAD:
