@@ -164,12 +164,14 @@ app.get('/coexistence/start', (req, res) => {
 
     // Construir URL de Embedded Signup
     // Hosted Embedded Signup: Meta maneja toda la autenticación
-    const embeddedSignupUrl =
-      `https://business.facebook.com/wa/manage/coexistence/` +
-      `?business_id=${businessPortfolioId}` +
-      `&waba_id=${targetWabaId}` +
-      `&redirect_uri=${encodeURIComponent(`${webhookUrl}/coexistence/callback`)}` +
-      `&state=${sessionId}`;
+    const configId = '1585556393220477'; // Facebook Login for Business CONFIG_ID
+const embeddedSignupUrl =
+  `https://www.facebook.com/v25.0/dialog/oauth` +
+  `?client_id=${metaAppId}` +
+  `&redirect_uri=${encodeURIComponent(`${webhookUrl}/coexistence/callback`)}` +
+  `&state=${sessionId}` +
+  `&config_id=${configId}` +
+  `&response_type=code`;
 
     logEvent('EMBEDDED_SIGNUP_URL_GENERATED', {
       url: embeddedSignupUrl,
@@ -316,7 +318,7 @@ app.get('/coexistence/callback', async (req, res) => {
     if (code && metaAppSecret) {
       try {
         const tokenResponse = await axios.post(
-          'https://graph.instagram.com/v18.0/oauth/access_token',
+          'https://graph.facebook.com/v25.0/oauth/access_token',
           {
             client_id: metaAppId,
             client_secret: metaAppSecret,
