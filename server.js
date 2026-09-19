@@ -19,13 +19,24 @@
  * 6. Coexistence activado ✅
  */
 
+// ============================================
+// WhatsApp Coexistence Backend - Version 2.0.1
+// ============================================
+
 require('dotenv').config();
 const express = require('express');
 const axios = require('axios');
 const crypto = require('crypto');
+const path = require('path');
+const fs = require('fs');
 const app = express();
 
 app.use(express.json());
+
+// ============================================
+// STATIC FILES - Servir archivos públicos (HTML, CSS, JS)
+// ============================================
+app.use(express.static(path.join(__dirname, 'public')));
 
 // ============================================
 // CONFIGURACIÓN CRÍTICA
@@ -49,6 +60,9 @@ const webhookUrl = process.env.WEBHOOK_URL || 'https://tomcat-whatsapp-api.onren
 // Meta Pixel
 const pixelId = process.env.PIXEL_ID;
 const pixelAccessToken = process.env.PIXEL_ACCESS_TOKEN;
+
+// Admin Security - MUST be set in environment variables
+const adminApiKey = process.env.ADMIN_API_KEY;
 
 // Encryption
 const encryptionKey = process.env.ENCRYPTION_KEY || crypto.randomBytes(32).toString('hex');
@@ -101,7 +115,7 @@ const logEvent = (type, data) => {
     service: 'tomcat-whatsapp-api'
   };
 
-  console.log(`\n[${type}] ${timestamp}`);
+  console.log(`\n[${ type }] ${timestamp}`);
   console.log(JSON.stringify(logEntry, null, 2));
 
   // Guardar en histórico (máximo 1000 eventos)
@@ -139,61 +153,50 @@ app.get('/health', (req, res) => {
 /**
  * GET /coexistence/start
  *
- * Inicia el flujo de Embedded Signup de Meta para Coexistence.
- * Genera una sesión, establece el estado CSRF, y redirige a Meta.
+ * Sirve la página HTML de Embedded Signup v4 correcta.
+ * FLUJO CORRECTO:
+ * - Usa SDK de JavaScript de Facebook
+ * - Parámetro: featureType: "whatsapp_business_app_onboarding"
+ * - Evento esperado: FINISH_WHATSAPP_BUSINESS_APP_ONBOARDING
+ * - NO redirige a OAuth genérico de Facebook
  */
 app.get('/coexistence/start', (req, res) => {
   try {
     logEvent('COEXISTENCE_START', {
-      message: 'Iniciando flujo Embedded Signup',
-      targetPhone: targetPhoneNumber,
-      businessPortfolioId
-    });
-
-    // Generar session state único
-    const sessionId = crypto.randomBytes(16).toString('hex');
-    const sessionState = {
-      id: sessionId,
-      createdAt: new Date(),
-      expiresAt: new Date(Date.now() + 15 * 60 * 1000), // 15 minutos
-      status: 'pending',
+      message: 'Sirviendo página Embedded Signup v4',
+      method: 'JavaScript SDK con featureType',
       targetPhone: targetPhoneNumber
-    };
-
-    coexistenceStore.sessions[sessionId] = sessionState;
-
-    // Construir URL de Embedded Signup
-    // Hosted Embedded Signup: Meta maneja toda la autenticación
-    const configId = '1585556393220477'; // Facebook Login for Business CONFIG_ID
-const embeddedSignupUrl =
-  `https://www.facebook.com/v25.0/dialog/oauth` +
-  `?client_id=${metaAppId}` +
-  `&redirect_uri=${encodeURIComponent(`${webhookUrl}/coexistence/callback`)}` +
-  `&state=${sessionId}` +
-  `&config_id=${configId}` +
-  `&response_type=code`;
-
-    logEvent('EMBEDDED_SIGNUP_URL_GENERATED', {
-      url: embeddedSignupUrl,
-      sessionId,
-      expiresIn: '15 minutes'
     });
 
-    // Responder con instrucciones y URL
-    res.json({
-      success: true,
-      message: 'Embedded Signup iniciado. Abre la URL en tu navegador.',
-      sessionId,
-      embeddedSignupUrl,
-      instructions: [
-        '1. Abre la URL anterior en tu navegador',
-        '2. Inicia sesión con tu cuenta Meta/Facebook',
-        '3. Escanea el código QR con WhatsApp Business App',
-        '4. Confirma la autorización en el navegador',
-        '5. Vuelve aquí para completar la configuración'
-      ],
-      expiresAt: sessionState.expiresAt.toISOString()
-    });
+    // Leer la página HTML correcta
+    const fs = require('fs');
+    const path = require('path');
+    const htmlPath = path.join(__dirname, 'public', 'whatsapp-coexistence-embedded-signup-v4.html');
+
+    if (fs.existsSync(htmlPath)) {
+      res.set('Content-Type', 'text/html; charset=utf-8');
+      res.sendFile(htmlPath);
+    } else {
+      // Si no existe el archivo (ej: en producción), devolver HTML inline
+      res.set('Content-Type', 'text/html; charset=utf-8');
+      res.send(`
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <title>WhatsApp Coexistence - Conectando...</title>
+</head>
+<body>
+    <div style="text-align: center; padding: 50px; font-family: Arial;">
+        <h1>⚠️ Página HTML no disponible</h1>
+        <p>El archivo 'whatsapp-coexistence-embedded-signup-v4.html' no se encontró.</p>
+        <p>Por favor, asegúrate de que esté en el directorio public/.</p>
+        <p style="color: #999; margin-top: 30px;">Backend versión: v2.1 (corrected)</p>
+    </div>
+</body>
+</html>
+      `);
+    }
 
   } catch (error) {
     logEvent('COEXISTENCE_START_ERROR', {
@@ -201,7 +204,7 @@ const embeddedSignupUrl =
       stack: error.stack
     });
     res.status(500).json({
-      error: 'Failed to start Embedded Signup',
+      error: 'Failed to serve Embedded Signup',
       details: error.message
     });
   }
@@ -317,6 +320,9 @@ app.get('/coexistence/callback', async (req, res) => {
     let accessToken = null;
     if (code && metaAppSecret) {
       try {
+        // CORRECCIÓN: Usar endpoint correcto de Graph API (v25.0)
+        // Antes: graph.instagram.com (INCORRECTO para OAuth de Facebook)
+        // Ahora: graph.facebook.com/v25.0/oauth/access_token (CORRECTO)
         const tokenResponse = await axios.post(
           'https://graph.facebook.com/v25.0/oauth/access_token',
           {
@@ -394,6 +400,107 @@ app.get('/coexistence/callback', async (req, res) => {
       error: 'Callback processing failed',
       message: error.message,
       support: 'Contacta al equipo técnico de Tomcat Store'
+    });
+  }
+});
+
+// ============================================
+// EMBEDDED SIGNUP - CALLBACK POST (desde JavaScript SDK)
+// ============================================
+
+/**
+ * POST /coexistence/callback
+ *
+ * Callback POST desde la página HTML con SDK de JavaScript.
+ * Recibe los datos del evento FINISH_WHATSAPP_BUSINESS_APP_ONBOARDING.
+ *
+ * Body esperado:
+ * {
+ *   event: "FINISH_WHATSAPP_BUSINESS_APP_ONBOARDING",
+ *   waba_id: "...",
+ *   phone_number_id: "...",
+ *   timestamp: "..."
+ * }
+ */
+app.post('/coexistence/callback', async (req, res) => {
+  try {
+    const { event, waba_id, phone_number_id, timestamp } = req.body;
+
+    logEvent('COEXISTENCE_CALLBACK_POST', {
+      event,
+      waba_id,
+      phone_number_id,
+      timestamp
+    });
+
+    // Validar evento esperado
+    if (event !== 'FINISH_WHATSAPP_BUSINESS_APP_ONBOARDING') {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid event',
+        message: `Expected FINISH_WHATSAPP_BUSINESS_APP_ONBOARDING but got ${event}`
+      });
+    }
+
+    // Validar phone_number_id
+    if (!phone_number_id) {
+      return res.status(400).json({
+        success: false,
+        error: 'Missing phone_number_id'
+      });
+    }
+
+    // Almacenar datos de Coexistence
+    coexistenceStore.phoneNumbers[targetPhoneNumber] = {
+      phone: targetPhoneNumber,
+      phone_number_id,
+      wabaId: waba_id || targetWabaId,
+      businessPortfolioId,
+      status: 'active',
+      authorizedAt: new Date(timestamp) || new Date(),
+      coexistenceActive: true,
+      completedVia: 'embedded_signup_v4_javascript_sdk',
+      capabilities: {
+        cloudApi: true,
+        businessApp: true,
+        messageSyncEnabled: true
+      }
+    };
+
+    logEvent('COEXISTENCE_ACTIVATED_VIA_SDK', {
+      phone: targetPhoneNumber,
+      phone_number_id,
+      wabaId: waba_id,
+      method: 'JavaScript SDK',
+      event
+    });
+
+    // Respuesta exitosa
+    res.json({
+      success: true,
+      message: 'Coexistence completado exitosamente ✅',
+      phoneNumber: targetPhoneNumber,
+      phoneNumberId: phone_number_id,
+      wabaId: waba_id,
+      status: 'active',
+      coexistenceActive: true,
+      features: {
+        cloudApi: 'Habilitado',
+        businessApp: 'Habilitado',
+        messageSyncEnabled: 'Activo'
+      }
+    });
+
+  } catch (error) {
+    logEvent('COEXISTENCE_CALLBACK_POST_ERROR', {
+      error: error.message,
+      stack: error.stack
+    });
+
+    res.status(500).json({
+      success: false,
+      error: 'POST callback processing failed',
+      message: error.message
     });
   }
 });
@@ -626,6 +733,254 @@ app.get('/webhooks/status', (req, res) => {
     eventCount: coexistenceStore.webhookEvents.length,
     recentEvents: coexistenceStore.webhookEvents.slice(-10)
   });
+});
+
+// ============================================
+// ADMIN ENDPOINTS - DEREGISTER PHONE NUMBER (TEMPORAL)
+// ============================================
+
+/**
+ * GET /admin/deregister-status
+ * Obtiene el estado actual de números de teléfono en la WABA
+ */
+app.get('/admin/deregister-status', async (req, res) => {
+  // Validate admin API key from environment
+  if (!adminApiKey) {
+    return res.status(500).json({ error: 'Admin API key not configured' });
+  }
+
+  const providedKey = req.query.key || req.headers['x-admin-key'];
+  if (providedKey !== adminApiKey) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+
+  try {
+    logEvent('ADMIN_DEREGISTER_STATUS_REQUESTED', {
+      timestamp: new Date().toISOString(),
+      targetWaba: targetWabaId
+    });
+
+    // Obtener números de teléfono actuales
+    const phoneNumbersResponse = await axios.get(
+      `https://graph.facebook.com/v25.0/${targetWabaId}/phone_numbers`,
+      {
+        params: {
+          fields: 'id,display_phone_number,status,verified_name,quality_rating,messaging_limit_tier',
+          access_token: metaAccessToken
+        }
+      }
+    );
+
+    const phoneNumbers = phoneNumbersResponse.data.data || [];
+    const backup = {
+      timestamp: new Date().toISOString(),
+      action: 'PRE-DEREGISTRATION_STATUS',
+      wabaId: targetWabaId,
+      phoneNumbers: phoneNumbers,
+      targetPhoneNumber: targetPhoneNumber,
+      status: 'READY_FOR_DEREGISTER'
+    };
+
+    // Guardar backup
+    const backupDir = path.join(__dirname, 'backups');
+    if (!fs.existsSync(backupDir)) fs.mkdirSync(backupDir);
+    fs.writeFileSync(
+      path.join(backupDir, `backup-${Date.now()}.json`),
+      JSON.stringify(backup, null, 2)
+    );
+
+    logEvent('ADMIN_PHONE_NUMBERS_RETRIEVED', {
+      count: phoneNumbers.length,
+      phoneNumbers: phoneNumbers.map(p => ({
+        id: p.id,
+        number: p.display_phone_number,
+        status: p.status
+      }))
+    });
+
+    res.json({
+      success: true,
+      message: 'Números de teléfono obtenidos exitosamente',
+      wabaId: targetWabaId,
+      phoneNumbers: phoneNumbers,
+      backup: backup,
+      nextStep: 'Llamar a POST /admin/deregister-number con el phone_number_id'
+    });
+
+  } catch (error) {
+    logEvent('ADMIN_DEREGISTER_STATUS_ERROR', {
+      error: error.message,
+      response: error.response?.data
+    });
+
+    res.status(500).json({
+      success: false,
+      error: 'Error obteniendo números',
+      message: error.message,
+      details: error.response?.data
+    });
+  }
+});
+
+/**
+ * POST /admin/deregister-number
+ * Desregistra un número de teléfono de Cloud API
+ */
+app.post('/admin/deregister-number', async (req, res) => {
+  // Validate admin API key from environment
+  if (!adminApiKey) {
+    return res.status(500).json({ error: 'Admin API key not configured' });
+  }
+
+  const { phone_number_id, key } = req.body;
+
+  if (key !== adminApiKey) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+
+  if (!phone_number_id) {
+    return res.status(400).json({ error: 'phone_number_id is required' });
+  }
+
+  try {
+    logEvent('ADMIN_DEREGISTER_STARTED', {
+      phone_number_id,
+      targetPhoneNumber,
+      timestamp: new Date().toISOString()
+    });
+
+    // DESREGISTRAR NÚMERO
+    const deregisterResponse = await axios.post(
+      `https://graph.facebook.com/v25.0/${phone_number_id}/deregister`,
+      {},
+      {
+        params: {
+          access_token: metaAccessToken
+        }
+      }
+    );
+
+    logEvent('ADMIN_DEREGISTER_SUCCESS', {
+      phone_number_id,
+      response: deregisterResponse.data,
+      timestamp: new Date().toISOString()
+    });
+
+    // Documentar desvinculación
+    const deregisterRecord = {
+      timestamp: new Date().toISOString(),
+      action: 'PHONE_NUMBER_DEREGISTERED',
+      phone_number_id,
+      targetPhoneNumber,
+      wabaId: targetWabaId,
+      response: deregisterResponse.data,
+      status: 'SUCCESS'
+    };
+
+    const backupDir = path.join(__dirname, 'backups');
+    if (!fs.existsSync(backupDir)) fs.mkdirSync(backupDir);
+    fs.writeFileSync(
+      path.join(backupDir, `deregister-${Date.now()}.json`),
+      JSON.stringify(deregisterRecord, null, 2)
+    );
+
+    // Verificar estado post-desregistro
+    const postDeregisterStatus = await axios.get(
+      `https://graph.facebook.com/v25.0/${targetWabaId}/phone_numbers`,
+      {
+        params: {
+          fields: 'id,display_phone_number,status,verified_name',
+          access_token: metaAccessToken
+        }
+      }
+    );
+
+    res.json({
+      success: true,
+      message: '✅ Número desregistrado exitosamente',
+      deregisterResponse: deregisterResponse.data,
+      postDeregisterStatus: postDeregisterStatus.data.data || [],
+      documentation: {
+        timestamp: new Date().toISOString(),
+        action: 'PHONE_NUMBER_DEREGISTERED',
+        phone_number_id,
+        targetPhoneNumber,
+        wabaId: targetWabaId,
+        status: 'SUCCESS'
+      },
+      nextSteps: [
+        '1. El número +50487473359 ha sido desvinculado de Cloud API',
+        '2. Ahora puedes registrarlo en WhatsApp Business App',
+        '3. Después, podrás intentar Coexistence con Embedded Signup v4',
+        '4. Monitorea los webhooks en GET /webhooks/logs'
+      ]
+    });
+
+  } catch (error) {
+    logEvent('ADMIN_DEREGISTER_ERROR', {
+      phone_number_id,
+      error: error.message,
+      response: error.response?.data,
+      timestamp: new Date().toISOString()
+    });
+
+    res.status(500).json({
+      success: false,
+      error: 'Error desregistrando número',
+      message: error.message,
+      details: error.response?.data
+    });
+  }
+});
+
+/**
+ * GET /admin/verify-deregister
+ * Verifica el estado después de desregistro
+ */
+app.get('/admin/verify-deregister', async (req, res) => {
+  // Validate admin API key from environment
+  if (!adminApiKey) {
+    return res.status(500).json({ error: 'Admin API key not configured' });
+  }
+
+  const providedKey = req.query.key || req.headers['x-admin-key'];
+  if (providedKey !== adminApiKey) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+
+  try {
+    const currentStatus = await axios.get(
+      `https://graph.facebook.com/v25.0/${targetWabaId}/phone_numbers`,
+      {
+        params: {
+          fields: 'id,display_phone_number,status',
+          access_token: metaAccessToken
+        }
+      }
+    );
+
+    const targetNumber = currentStatus.data.data?.find(
+      p => p.display_phone_number === targetPhoneNumber
+    );
+
+    res.json({
+      success: true,
+      message: 'Estado actual de WABA',
+      wabaId: targetWabaId,
+      targetPhoneNumber,
+      currentPhoneNumbers: currentStatus.data.data,
+      targetNumberStatus: targetNumber || 'NO ENCONTRADO',
+      verification: targetNumber ? 'Número aún está en WABA' : '✅ Número desvinculado exitosamente',
+      timestamp: new Date().toISOString()
+    });
+
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error.message,
+      details: error.response?.data
+    });
+  }
 });
 
 // ============================================
