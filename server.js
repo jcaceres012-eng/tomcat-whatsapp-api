@@ -20,7 +20,8 @@
  */
 
 // ============================================
-// WhatsApp Coexistence Backend - Version 2.0.1
+// WhatsApp Coexistence Backend - Version 3.0.0
+// Persistencia PostgreSQL integrada
 // ============================================
 
 require('dotenv').config();
@@ -29,6 +30,7 @@ const axios = require('axios');
 const crypto = require('crypto');
 const path = require('path');
 const fs = require('fs');
+const { createPersistence } = require('./persistence');
 const app = express();
 
 app.use(express.json());
@@ -51,7 +53,7 @@ const metaAppSecret = process.env.META_APP_SECRET;
 const metaAccessToken = process.env.META_ACCESS_TOKEN;
 const businessPortfolioId = process.env.BUSINESS_PORTFOLIO_ID || '603733427671323';
 const targetWabaId = process.env.TARGET_WABA_ID || '28291929163801429';
-const targetPhoneNumber = process.env.TARGET_PHONE_NUMBER || '+50487473359';
+const targetPhoneNumber = process.env.TARGET_PHONE_NUMBER || '+50488447759';
 
 // Webhook
 const verifyToken = process.env.VERIFY_TOKEN || 'tomcat_webhook_secure_token_v2';
@@ -68,37 +70,71 @@ const adminApiKey = process.env.ADMIN_API_KEY;
 const encryptionKey = process.env.ENCRYPTION_KEY || crypto.randomBytes(32).toString('hex');
 
 // ============================================
-// STORAGE EN MEMORIA (Producción: usar DB)
+// PERSISTENCIA POSTGRESQL
 // ============================================
 
+let persistence = null;
+
+// Storage en memoria para webhooks (no persistidos)
 const coexistenceStore = {
-  sessions: {},           // Sesiones OAuth en progreso
-  phoneNumbers: {},       // Phone numbers vinculados
-  tokens: {},             // Tokens encriptados
-  webhookEvents: []       // Histórico de eventos
+  sessions: {},           // MIGRANDO a base de datos
+  phoneNumbers: {},       // MIGRANDO a base de datos
+  tokens: {},             // MIGRANDO a base de datos (read-only cache)
+  webhookEvents: []       // Histórico de eventos (no persistido, máx 1000)
 };
 
-// ============================================
-// UTILIDADES DE ENCRIPTACIÓN
-// ============================================
+// Inicializar persistencia en arranque
+async function initPersistence() {
+  try {
+    const databaseUrl = process.env.DATABASE_URL;
+    if (!databaseUrl) {
+      console.warn('DATABASE_URL no configurada. Usando solo almacenamiento en memoria.');
+      return;
+    }
 
-function encryptToken(token) {
-  const cipher = crypto.createCipher('aes-256-cbc', encryptionKey);
-  let encrypted = cipher.update(token, 'utf8', 'hex');
-  encrypted += cipher.final('hex');
-  return encrypted;
+    persistence = createPersistence({
+      databaseUrl,
+      encryptionKey,
+      logger: logEvent
+    });
+
+    await persistence.init();
+    logEvent('PERSISTENCE_INITIALIZED', { ok: true });
+
+    // Hidratar store con datos de la base
+    const hydrateResult = await persistence.hydrate(coexistenceStore, targetPhoneNumber);
+    logEvent('PERSISTENCE_HYDRATED', hydrateResult);
+  } catch (error) {
+    logEvent('PERSISTENCE_INIT_ERROR', { error: error.message });
+    throw error;
+  }
 }
 
-function decryptToken(encrypted) {
-  try {
-    const decipher = crypto.createDecipher('aes-256-cbc', encryptionKey);
-    let decrypted = decipher.update(encrypted, 'hex', 'utf8');
-    decrypted += decipher.final('utf8');
-    return decrypted;
-  } catch (error) {
-    console.error('Decryption error:', error.message);
-    return null;
+// ============================================
+// HELPER: OBTENER TOKEN CON VALIDACIÓN
+// ============================================
+
+async function getCoexistenceToken(phone) {
+  if (!persistence) {
+    // Fallback: usar token estático si no hay persistencia
+    return { token: metaAccessToken, expired: false, keyMismatch: false };
   }
+
+  const result = await persistence.getTokenPlaintext(phone);
+
+  if (!result) {
+    return { token: null, expired: false, keyMismatch: false, error: 'No token found' };
+  }
+
+  if (result.keyMismatch) {
+    return { token: null, expired: false, keyMismatch: true, error: 'Encryption key mismatch' };
+  }
+
+  if (result.expired) {
+    return { token: null, expired: true, keyMismatch: false, error: 'Token expired' };
+  }
+
+  return { token: result.token, expired: false, keyMismatch: false };
 }
 
 // ============================================
@@ -130,20 +166,55 @@ const logEvent = (type, data) => {
 // ============================================
 
 app.get('/health', (req, res) => {
+  // Liveness probe: solo verifica que el proceso responde
   res.json({
     status: 'OK',
     timestamp: new Date().toISOString(),
     service: 'tomcat-whatsapp-api',
     environment: nodeEnv,
-    webhook: 'Configured',
-    pixelEnabled: !!pixelAccessToken,
-    coexistenceEnabled: !!metaAccessToken,
-    coexistenceStore: {
-      activeSessions: Object.keys(coexistenceStore.sessions).length,
-      linkedPhoneNumbers: Object.keys(coexistenceStore.phoneNumbers).length,
-      recentEvents: coexistenceStore.webhookEvents.length
-    }
+    uptime: process.uptime(),
+    version: '3.0.0'
   });
+});
+
+// ============================================
+// ENDPOINT: READINESS CHECK
+// ============================================
+
+app.get('/ready', async (req, res) => {
+  // Readiness probe: verifica persistencia, hidratación, estado de encriptación
+  try {
+    let checks = {
+      database: false,
+      hydrated: false,
+      encryptionKey: true,
+      keyMismatch: false
+    };
+
+    if (persistence) {
+      const { ready, checks: persistenceChecks } = await persistence.readiness();
+      checks = persistenceChecks;
+
+      if (!ready) {
+        return res.status(503).json({
+          ready: false,
+          checks,
+          message: 'Sistema no listo'
+        });
+      }
+    }
+
+    res.json({
+      ready: true,
+      checks,
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    res.status(503).json({
+      ready: false,
+      error: error.message
+    });
+  }
 });
 
 // ============================================
@@ -336,26 +407,42 @@ app.get('/coexistence/callback', async (req, res) => {
         );
 
         accessToken = tokenResponse.data.access_token;
+        const expiresIn = tokenResponse.data.expires_in || 5184000; // 60 días default
+        const expiresAt = new Date(Date.now() + expiresIn * 1000);
 
-        // Encriptar y almacenar token
-        const encryptedToken = encryptToken(accessToken);
+        // WRITE-AHEAD: Persistir en base ANTES de tocar memoria
+        if (persistence) {
+          await persistence.persistTokenCritical(
+            targetPhoneNumber,
+            accessToken,
+            expiresAt,
+            'access_token'
+          );
+        }
+
+        // Después de confirmar en base, guardar en memoria (cache)
         coexistenceStore.tokens[targetPhoneNumber] = {
-          encryptedToken,
-          expiresAt: new Date(Date.now() + 60 * 60 * 1000), // 1 hora
+          encryptedToken: '[en base de datos]',
+          expiresAt,
           type: 'access_token'
         };
 
         logEvent('ACCESS_TOKEN_OBTAINED', {
           phone: targetPhoneNumber,
           tokenType: 'access_token',
-          expiresIn: '1 hour'
+          expiresIn: expiresIn,
+          expiresAt: expiresAt.toISOString(),
+          persisted: !!persistence
         });
       } catch (error) {
         logEvent('ACCESS_TOKEN_ERROR', {
           phone: targetPhoneNumber,
-          error: error.message
+          error: error.message,
+          severidad: 'critica'
         });
-        // No es crítico si falla - continuar con configuración básica
+        // CRÍTICO: Este error debe propagarse para indicar fallo en Embedded Signup
+        throw new Error('No se pudo obtener o persistir el token de Coexistence. ' +
+                        'La vinculacion NO se completo: repita el Embedded Signup.');
       }
     }
 
@@ -760,13 +847,41 @@ app.get('/admin/deregister-status', async (req, res) => {
       targetWaba: targetWabaId
     });
 
+    // Obtener token de Coexistence de la base de datos
+    const tokenData = await getCoexistenceToken(targetPhoneNumber);
+    const accessToken = tokenData.token || metaAccessToken;
+
+    if (tokenData.keyMismatch) {
+      return res.status(409).json({
+        error: 'Token key mismatch',
+        message: 'La clave de encriptación cambió. Token irrecuperable.',
+        action: 'Repite Embedded Signup'
+      });
+    }
+
+    if (tokenData.expired) {
+      return res.status(409).json({
+        error: 'Token expired',
+        message: 'El token de Coexistence está caducado.',
+        action: 'Repite Embedded Signup'
+      });
+    }
+
+    if (!accessToken) {
+      return res.status(409).json({
+        error: 'No token available',
+        message: 'No hay token de Coexistence configurado.',
+        action: 'Completa Embedded Signup'
+      });
+    }
+
     // Obtener números de teléfono actuales
     const phoneNumbersResponse = await axios.get(
       `https://graph.facebook.com/v25.0/${targetWabaId}/phone_numbers`,
       {
         params: {
           fields: 'id,display_phone_number,status,verified_name,quality_rating,messaging_limit_tier',
-          access_token: metaAccessToken
+          access_token: accessToken
         }
       }
     );
@@ -849,13 +964,41 @@ app.post('/admin/deregister-number', async (req, res) => {
       timestamp: new Date().toISOString()
     });
 
+    // Obtener token de Coexistence de la base de datos
+    const tokenData = await getCoexistenceToken(targetPhoneNumber);
+    const accessToken = tokenData.token || metaAccessToken;
+
+    if (tokenData.keyMismatch) {
+      return res.status(409).json({
+        error: 'Token key mismatch',
+        message: 'La clave de encriptación cambió. Token irrecuperable.',
+        action: 'Repite Embedded Signup'
+      });
+    }
+
+    if (tokenData.expired) {
+      return res.status(409).json({
+        error: 'Token expired',
+        message: 'El token de Coexistence está caducado.',
+        action: 'Repite Embedded Signup'
+      });
+    }
+
+    if (!accessToken) {
+      return res.status(409).json({
+        error: 'No token available',
+        message: 'No hay token de Coexistence configurado.',
+        action: 'Completa Embedded Signup'
+      });
+    }
+
     // DESREGISTRAR NÚMERO
     const deregisterResponse = await axios.post(
       `https://graph.facebook.com/v25.0/${phone_number_id}/deregister`,
       {},
       {
         params: {
-          access_token: metaAccessToken
+          access_token: accessToken
         }
       }
     );
@@ -949,12 +1092,23 @@ app.get('/admin/verify-deregister', async (req, res) => {
   }
 
   try {
+    // Obtener token de Coexistence de la base de datos
+    const tokenData = await getCoexistenceToken(targetPhoneNumber);
+    const accessToken = tokenData.token || metaAccessToken;
+
+    if (!accessToken) {
+      return res.status(409).json({
+        error: 'No token available',
+        message: 'No hay token de Coexistence configurado.'
+      });
+    }
+
     const currentStatus = await axios.get(
       `https://graph.facebook.com/v25.0/${targetWabaId}/phone_numbers`,
       {
         params: {
           fields: 'id,display_phone_number,status',
-          access_token: metaAccessToken
+          access_token: accessToken
         }
       }
     );
@@ -1021,30 +1175,61 @@ app.use((req, res) => {
 // INICIO DEL SERVIDOR
 // ============================================
 
-app.listen(port, () => {
-  console.log(`\n╔═══════════════════════════════════════════╗`);
-  console.log(`║   WhatsApp Coexistence API                ║`);
-  console.log(`║   Tomcat Store - Honduras                 ║`);
-  console.log(`║   Puerto: ${port}                              ║`);
-  console.log(`║   Modo: ${nodeEnv.toUpperCase().padEnd(30)}║`);
-  console.log(`╚═══════════════════════════════════════════╝\n`);
+// ============================================
+// ARRANQUE SECUENCIAL: PERSISTENCIA ANTES DE ESCUCHAR
+// ============================================
 
-  logEvent('SERVER_STARTED', {
-    port,
-    environment: nodeEnv,
-    services: {
-      webhookReceiver: 'Active',
-      embeddedSignup: 'Ready',
-      pixelIntegration: pixelAccessToken ? 'Active' : 'Disabled',
-      coexistenceTarget: targetPhoneNumber
-    },
-    endpoints: {
-      health: '/health',
-      embeddedSignup: '/coexistence/start',
-      webhookReceiver: '/',
-      status: '/coexistence/status'
-    }
-  });
+async function arrancar() {
+  try {
+    console.log('\n[STARTUP] Inicializando persistencia...');
+    await initPersistence();
+    console.log('[STARTUP] Persistencia inicializada ✓');
+
+    // Ahora sí, escuchar tráfico
+    return new Promise((resolve) => {
+        app.listen(port, () => {
+          console.log(`\n╔═══════════════════════════════════════════╗`);
+          console.log(`║   WhatsApp Coexistence API v3.0.0         ║`);
+          console.log(`║   Tomcat Store - Honduras                 ║`);
+          console.log(`║   Puerto: ${port}                              ║`);
+          console.log(`║   Modo: ${nodeEnv.toUpperCase().padEnd(30)}║`);
+          console.log(`║   Persistencia: ${persistence ? 'PostgreSQL' : 'Memory   '}           ║`);
+          console.log(`╚═══════════════════════════════════════════╝\n`);
+
+          logEvent('SERVER_STARTED', {
+            port,
+            environment: nodeEnv,
+            persistenceEnabled: !!persistence,
+            services: {
+              webhookReceiver: 'Active',
+              embeddedSignup: 'Ready',
+              pixelIntegration: pixelAccessToken ? 'Active' : 'Disabled',
+              coexistenceTarget: targetPhoneNumber
+            },
+            endpoints: {
+              health: '/health',
+              ready: '/ready',
+              embeddedSignup: '/coexistence/start',
+              webhookReceiver: '/',
+              status: '/coexistence/status'
+            }
+          });
+
+          resolve();
+        });
+      });
+  } catch (error) {
+    console.error('FALLO DE ARRANQUE (persistencia):', error.message);
+    process.exit(1);
+  }
+}
+
+// Iniciar el servidor
+arrancar().then(() => {
+  logEvent('PERSISTENCE_READY', { mensaje: 'Sistema listo para recibir tráfico' });
+}).catch(error => {
+  console.error('Arranque fallido:', error.message);
+  process.exit(1);
 });
 
 module.exports = app;
