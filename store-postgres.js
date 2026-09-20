@@ -15,7 +15,7 @@
 
 import { createCryptoModule } from './crypto-fixed.js';
 
-const SCHEMA = \`
+const SCHEMA = `
 CREATE TABLE IF NOT EXISTS oauth_sessions (
   state        TEXT PRIMARY KEY,
   data         JSONB       NOT NULL,
@@ -40,7 +40,7 @@ CREATE TABLE IF NOT EXISTS business_tokens (
   updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_expires ON oauth_sessions (expires_at);
-\`;
+`;
 
 function createStore({ pool, encryptionKey }) {
   // Falla al arrancar si la clave no es valida. Deliberado.
