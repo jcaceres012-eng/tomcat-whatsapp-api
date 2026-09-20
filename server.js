@@ -1052,7 +1052,7 @@ app.post('/admin/deregister-number', async (req, res) => {
         status: 'SUCCESS'
       },
       nextSteps: [
-        '1. El número +50487473359 ha sido desvinculado de Cloud API',
+        `1. El número ${targetPhoneNumber} ha sido desvinculado de Cloud API`,
         '2. Ahora puedes registrarlo en WhatsApp Business App',
         '3. Después, podrás intentar Coexistence con Embedded Signup v4',
         '4. Monitorea los webhooks en GET /webhooks/logs'
