@@ -5,7 +5,10 @@
  * para acceder a tokens, números de teléfono y sesiones.
  */
 
-const { createStore } = require('./store-postgres');
+import pg from 'pg';
+import { createStore } from './store-postgres.js';
+
+const { Pool } = pg;
 
 let coexistenceStore = null;
 
@@ -13,7 +16,7 @@ let coexistenceStore = null;
  * Inicializa la persistencia. Se llama una sola vez en server.js.
  * FAIL-CLOSED: si la base de datos no conecta, lanza error y app muere.
  */
-async function initPersistence() {
+export async function initPersistence() {
   if (coexistenceStore) {
     return; // ya inicializada
   }
@@ -28,8 +31,25 @@ async function initPersistence() {
     throw new Error('ENCRYPTION_KEY requerida');
   }
 
+  // Crear un Pool de conexiones a PostgreSQL
+  const pool = new Pool({
+    connectionString: dbUrl,
+    max: 10,
+    idleTimeoutMillis: 30000,
+    connectionTimeoutMillis: 2000,
+  });
+
+  // Probar la conexión
+  try {
+    const testClient = await pool.connect();
+    testClient.release();
+    console.log('[persistence] Conexión a PostgreSQL exitosa');
+  } catch (err) {
+    throw new Error(`No se puede conectar a PostgreSQL: ${err.message}`);
+  }
+
   // Crear e inicializar el store PostgreSQL
-  coexistenceStore = createStore(dbUrl, encKey);
+  coexistenceStore = createStore({ pool, encryptionKey: encKey });
   await coexistenceStore.init();
   
   console.log('[persistence] Base de datos inicializada. keyFingerprint:', coexistenceStore.keyFingerprint);
@@ -38,14 +58,9 @@ async function initPersistence() {
 /**
  * Devuelve el store inicializado (después de initPersistence).
  */
-function getStore() {
+export function getStore() {
   if (!coexistenceStore) {
     throw new Error('Persistencia no inicializada (call initPersistence primero)');
   }
   return coexistenceStore;
 }
-
-module.exports = {
-  initPersistence,
-  getStore,
-};

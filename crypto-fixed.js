@@ -10,7 +10,7 @@
  *   const decrypted = cm.decryptToken(encrypted);
  */
 
-const crypto = require('crypto');
+import crypto from 'crypto';
 
 const ALGORITHM = 'aes-256-cbc';
 const KEY_SIZE = 32;  // 256 bits for aes-256
@@ -92,4 +92,4 @@ function createCryptoModule(encryptionKeyHex) {
   };
 }
 
-module.exports = { createCryptoModule };
+export { createCryptoModule };
