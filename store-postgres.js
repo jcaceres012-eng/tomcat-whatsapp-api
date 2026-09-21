@@ -13,7 +13,7 @@
  * y que los datos ya no son descifrables, en vez de fallar en silencio.
  */
 
-import { createCryptoModule } from './crypto-fixed.js';
+const { createCryptoModule } = require('./crypto-fixed');
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS oauth_sessions (
@@ -146,4 +146,4 @@ function createStore({ pool, encryptionKey }) {
            keyFingerprint: cm.keyFingerprint };
 }
 
-export { createStore, SCHEMA };
+module.exports = { createStore, SCHEMA };

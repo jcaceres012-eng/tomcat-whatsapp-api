@@ -1,0 +1,540 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WhatsApp Coexistence - Embedded Signup v4</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+
+        .container {
+            background: white;
+            border-radius: 20px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+            max-width: 600px;
+            width: 100%;
+            padding: 40px;
+            text-align: center;
+        }
+
+        .logo {
+            width: 80px;
+            height: 80px;
+            margin: 0 auto 20px;
+            background: linear-gradient(135deg, #25D366 0%, #128C7E 100%);
+            border-radius: 16px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 48px;
+        }
+
+        h1 {
+            color: #333;
+            font-size: 32px;
+            margin-bottom: 10px;
+            font-weight: 700;
+        }
+
+        .subtitle {
+            color: #666;
+            font-size: 16px;
+            margin-bottom: 30px;
+            line-height: 1.5;
+        }
+
+        .phone-display {
+            background: #f0f0f0;
+            border: 2px solid #25D366;
+            border-radius: 12px;
+            padding: 15px;
+            margin: 25px 0;
+            font-weight: bold;
+            color: #128C7E;
+            font-size: 20px;
+        }
+
+        .status-box {
+            background: #e8f5e9;
+            border-left: 4px solid #4CAF50;
+            padding: 15px;
+            border-radius: 8px;
+            margin: 20px 0;
+            text-align: left;
+            font-size: 14px;
+            color: #2e7d32;
+            line-height: 1.6;
+        }
+
+        .status-box.waiting {
+            background: #fff3e0;
+            border-left-color: #ff9800;
+            color: #e65100;
+        }
+
+        .status-box.error {
+            background: #ffebee;
+            border-left-color: #f44336;
+            color: #c62828;
+        }
+
+        .button-group {
+            display: flex;
+            gap: 12px;
+            margin: 30px 0;
+        }
+
+        button {
+            flex: 1;
+            padding: 14px 20px;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 16px;
+            font-weight: 600;
+            transition: all 0.3s ease;
+        }
+
+        .btn-primary {
+            background: #25D366;
+            color: white;
+        }
+
+        .btn-primary:hover:not(:disabled) {
+            background: #1fa854;
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(37, 211, 102, 0.3);
+        }
+
+        .btn-primary:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+            opacity: 0.6;
+        }
+
+        .btn-secondary {
+            background: #f0f0f0;
+            color: #333;
+            border: 1px solid #ddd;
+        }
+
+        .btn-secondary:hover {
+            background: #e0e0e0;
+        }
+
+        .info-section {
+            background: #f9f9f9;
+            padding: 20px;
+            border-radius: 8px;
+            margin: 20px 0;
+            text-align: left;
+            font-size: 14px;
+            color: #555;
+        }
+
+        .info-section h3 {
+            color: #333;
+            margin-bottom: 10px;
+            font-size: 16px;
+        }
+
+        .info-section ul {
+            list-style: none;
+            padding-left: 0;
+        }
+
+        .info-section li {
+            padding: 8px 0;
+            border-bottom: 1px solid #eee;
+        }
+
+        .info-section li:last-child {
+            border-bottom: none;
+        }
+
+        .info-section li:before {
+            content: "✓ ";
+            color: #25D366;
+            font-weight: bold;
+            margin-right: 8px;
+        }
+
+        .config-display {
+            background: #f5f5f5;
+            padding: 15px;
+            border-radius: 8px;
+            margin: 15px 0;
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+            text-align: left;
+            overflow-x: auto;
+        }
+
+        .loading {
+            display: none;
+            text-align: center;
+            padding: 20px;
+        }
+
+        .spinner {
+            display: inline-block;
+            width: 40px;
+            height: 40px;
+            border: 4px solid #f3f3f3;
+            border-top: 4px solid #25D366;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        .footer {
+            color: #999;
+            font-size: 12px;
+            margin-top: 30px;
+            border-top: 1px solid #eee;
+            padding-top: 20px;
+        }
+
+        .badge {
+            display: inline-block;
+            background: #4CAF50;
+            color: white;
+            padding: 6px 14px;
+            border-radius: 20px;
+            font-size: 11px;
+            font-weight: bold;
+            margin-top: 15px;
+        }
+
+        @media (max-width: 600px) {
+            .container {
+                padding: 25px;
+            }
+            h1 {
+                font-size: 24px;
+            }
+            .button-group {
+                flex-direction: column;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="logo">💬</div>
+        <h1>WhatsApp Coexistence</h1>
+        <p class="subtitle">Conecta tu WhatsApp Business App a Cloud API en el mismo número</p>
+
+        <div class="phone-display" id="phoneDisplay">+50488447759</div>
+
+        <div class="status-box" id="statusBox">
+            <strong>Estado:</strong> Listo para conectar
+        </div>
+
+        <div class="info-section">
+            <h3>¿Qué sucederá?</h3>
+            <ul>
+                <li>Tu WhatsApp Business App seguirá funcionando en tu teléfono</li>
+                <li>Se conectará a WhatsApp Cloud API simultáneamente</li>
+                <li>Ambas plataformas operarán en el mismo número</li>
+                <li>Los mensajes se sincronizarán automáticamente</li>
+            </ul>
+        </div>
+
+        <div class="button-group">
+            <button class="btn-primary" id="startBtn" onclick="initiateCoexistence()">
+                Conectar Ahora
+            </button>
+            <button class="btn-secondary" id="statusBtn" onclick="checkStatus()">
+                Ver Estado
+            </button>
+        </div>
+
+        <div class="loading" id="loading">
+            <div class="spinner"></div>
+            <p id="loadingText" style="margin-top: 15px; color: #666;">Abriendo flujo de autorización...</p>
+        </div>
+
+        <div class="config-display">
+            <div><strong>Configuración:</strong></div>
+            <div>App ID: <span id="appIdDisplay">[cargando]</span></div>
+            <div>Config ID: <span id="configIdDisplay">[cargando]</span></div>
+            <div>Versión: v4 Embedded Signup</div>
+            <div>Tipo: Coexistence (WhatsApp Business App)</div>
+        </div>
+
+        <span class="badge">✓ MÉTODO OFICIAL META v4</span>
+
+        <div class="footer">
+            <p>Embedded Signup v4 - Coexistence oficial de Meta</p>
+            <p>Para soporte: tech@tomcatstorehn.com</p>
+        </div>
+    </div>
+
+    <script>
+        // ============================================
+        // CONFIGURACIÓN - COMPLETAR ANTES DE USAR
+        // ============================================
+
+        // Tu Meta App ID (obtén de https://developers.facebook.com/apps)
+        const META_APP_ID = '949332344257619'; // COMPLETAR
+
+        // Facebook Login for Business Configuration ID
+        const CONFIG_ID = '1585556393220477'; // Ya configurado
+
+        // Backend callback URL
+        const BACKEND_URL = 'https://tomcat-whatsapp-api.onrender.com';
+
+        // ============================================
+        // INICIALIZACIÓN
+        // ============================================
+
+        window.fbAsyncInit = function() {
+            console.log('🔧 Inicializando Facebook SDK...');
+
+            FB.init({
+                appId: META_APP_ID,
+                version: 'v25.0',
+                xfbml: true,
+                status: true,
+                cookie: true,
+                frictionlessRequests: false
+            });
+
+            console.log('✅ Facebook SDK inicializado');
+            updateConfigDisplay();
+        };
+
+        // Cargar SDK de Facebook
+        (function(d, s, id) {
+            var js, fjs = d.getElementsByTagName(s)[0];
+            if (d.getElementById(id)) return;
+            js = d.createElement(s); js.id = id;
+            js.src = "https://connect.facebook.net/es_LA/sdk.js";
+            fjs.parentNode.insertBefore(js, fjs);
+        }(document, 'script', 'facebook-jssdk'));
+
+        // ============================================
+        // ESCUCHAR EVENTOS DE EMBEDDED SIGNUP
+        // ============================================
+
+        window.addEventListener('message', (event) => {
+            // Validar origen
+            if (event.origin !== 'https://www.facebook.com' &&
+                event.origin !== 'https://web.facebook.com') {
+                return;
+            }
+
+            try {
+                const data = JSON.parse(event.data);
+
+                if (data.type !== 'WA_EMBEDDED_SIGNUP') {
+                    return;
+                }
+
+                console.log('📨 Evento Embedded Signup:', data);
+                handleEmbeddedSignupEvent(data);
+
+            } catch (e) {
+                console.error('Error parsing message:', e);
+            }
+        });
+
+        // ============================================
+        // MANEJO DE EVENTOS EMBEDDED SIGNUP
+        // ============================================
+
+        function handleEmbeddedSignupEvent(data) {
+            const eventName = String(data.event ?? '').toUpperCase();
+
+            switch(eventName) {
+                case 'FINISH_WHATSAPP_BUSINESS_APP_ONBOARDING':
+                    handleCoexistenceSuccess(data);
+                    break;
+
+                case 'ERROR':
+                    handleCoexistenceError(data);
+                    break;
+
+                case 'CANCEL':
+                    handleCoexistenceCancel(data);
+                    break;
+
+                default:
+                    console.log('📍 Evento:', eventName, data);
+            }
+        }
+
+        function handleCoexistenceSuccess(data) {
+            console.log('✅ Coexistence completado exitosamente');
+            console.log('Datos recibidos:', data.data);
+
+            const waba_id = data.data?.waba_id;
+            const phone_number_id = data.data?.phone_number_id;
+
+            updateStatus('success', `
+                ✅ <strong>Coexistence Activado!</strong><br>
+                WABA ID: ${waba_id || '[no disponible]'}<br>
+                Phone Number ID: ${phone_number_id || '[no disponible]'}
+            `);
+
+            // Enviar al backend para almacenar
+            sendToBackend({
+                event: 'FINISH_WHATSAPP_BUSINESS_APP_ONBOARDING',
+                waba_id,
+                phone_number_id,
+                timestamp: new Date().toISOString()
+            });
+
+            // Deshabilitar botón
+            document.getElementById('startBtn').disabled = true;
+            document.getElementById('startBtn').textContent = 'Conectado ✓';
+        }
+
+        function handleCoexistenceError(data) {
+            console.error('❌ Error en Coexistence:', data.data);
+            updateStatus('error', `
+                ❌ <strong>Error:</strong><br>
+                ${data.data?.error_message || 'Error desconocido'}
+            `);
+        }
+
+        function handleCoexistenceCancel(data) {
+            console.log('⚠️ Coexistence cancelado por usuario');
+            updateStatus('waiting', 'Flujo cancelado. Puedes intentar de nuevo.');
+        }
+
+        // ============================================
+        // INICIAR FLUJO COEXISTENCE
+        // ============================================
+
+        function initiateCoexistence() {
+            console.log('🚀 Iniciando flujo Coexistence...');
+
+            if (!window.FB) {
+                updateStatus('error', 'SDK de Facebook no está listo. Recarga la página.');
+                return;
+            }
+
+            showLoading(true);
+            updateStatus('waiting', 'Abriendo flujo de autorización...');
+
+            // Llamar a FB.login con configuración de Coexistence
+            FB.login((response) => {
+                console.log('FB.login response:', response);
+
+                if (response.authResponse) {
+                    console.log('✅ Autorización recibida');
+                    console.log('Code:', response.authResponse.code);
+                    // El evento WA_EMBEDDED_SIGNUP ya manejará el resto
+                } else {
+                    console.log('❌ Autorización rechazada');
+                    updateStatus('error', 'Autorización rechazada. Intenta de nuevo.');
+                    showLoading(false);
+                }
+            }, {
+                config_id: CONFIG_ID,
+                response_type: 'code',
+                override_default_response_type: true,
+                extras: {
+                    setup: {},
+                    featureType: 'whatsapp_business_app_onboarding'  // CRÍTICO: Esto activa Coexistence
+                }
+            });
+        }
+
+        // ============================================
+        // VERIFICAR ESTADO
+        // ============================================
+
+        function checkStatus() {
+            console.log('🔍 Verificando estado...');
+            showLoading(true);
+            updateStatus('waiting', 'Verificando estado del servidor...');
+
+            fetch(`${BACKEND_URL}/coexistence/status`)
+                .then(res => res.json())
+                .then(data => {
+                    console.log('Estado del servidor:', data);
+                    showLoading(false);
+
+                    if (data.coexistenceActive) {
+                        updateStatus('success', `
+                            ✅ <strong>Coexistence Activo</strong><br>
+                            Teléfono: ${data.phoneNumber}<br>
+                            WABA ID: ${data.wabaId}
+                        `);
+                    } else {
+                        updateStatus('waiting', 'Coexistence aún no está activado.');
+                    }
+                })
+                .catch(err => {
+                    console.error('Error verificando estado:', err);
+                    showLoading(false);
+                    updateStatus('error', 'Error al verificar estado: ' + err.message);
+                });
+        }
+
+        // ============================================
+        // FUNCIONES AUXILIARES
+        // ============================================
+
+        function showLoading(show) {
+            document.getElementById('loading').style.display = show ? 'block' : 'none';
+            document.getElementById('startBtn').disabled = show;
+        }
+
+        function updateStatus(type, message) {
+            const box = document.getElementById('statusBox');
+            box.className = `status-box ${type === 'error' ? 'error' : type === 'waiting' ? 'waiting' : ''}`;
+            box.innerHTML = message;
+            console.log(`📊 Status [${type}]:`, message);
+        }
+
+        function updateConfigDisplay() {
+            document.getElementById('appIdDisplay').textContent = META_APP_ID;
+            document.getElementById('configIdDisplay').textContent = CONFIG_ID;
+        }
+
+        function sendToBackend(data) {
+            console.log('📤 Enviando datos al backend:', data);
+
+            fetch(`${BACKEND_URL}/coexistence/callback`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify(data)
+            })
+            .then(res => res.json())
+            .then(response => {
+                console.log('✅ Backend response:', response);
+            })
+            .catch(err => {
+                console.error('❌ Error enviando al backend:', err);
+            });
+        }
+
+        // Inicializar
+        console.log('🚀 Página cargada. Esperando que Facebook SDK se inicialice...');
+    </script>
+</body>
+</html>
