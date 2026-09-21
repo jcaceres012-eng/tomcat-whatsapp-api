@@ -307,44 +307,14 @@
         // INICIALIZACIÓN
         // ============================================
 
-        window.fbAsyncInit = function() {
-            console.log('🔧 Inicializando Facebook SDK...');
+        // Nota: Para Embedded Signup v4 NO necesitamos cargar el Facebook SDK
+        // ni usamos FB.login(). La comunicación es directa via window.open() y postMessage.
+        // Sin embargo, podríamos cargar el SDK para otras funcionalidades si es necesario.
 
-            FB.init({
-                appId: META_APP_ID,
-                version: 'v25.0',
-                xfbml: true,
-                status: true,
-                cookie: true,
-                frictionlessRequests: false
-            });
-
-            console.log('✅ Facebook SDK inicializado');
+        window.addEventListener('DOMContentLoaded', function() {
+            console.log('✅ Página cargada. Embedded Signup v4 listo.');
             updateConfigDisplay();
-        };
-
-        // Cargar SDK de Facebook con manejo mejorado de CORS
-        (function(d, s, id) {
-            var js, fjs = d.getElementsByTagName(s)[0];
-            if (d.getElementById(id)) return;
-            js = d.createElement(s);
-            js.id = id;
-            js.async = true;
-            js.defer = true;
-            js.src = "https://connect.facebook.net/es_LA/sdk.js";
-            js.crossOrigin = "anonymous";
-            js.onerror = function() {
-                console.error('❌ Error cargando Facebook SDK desde connect.facebook.net. Intentando endpoint alternativo...');
-                // Intento alternativo con en_US si falla es_LA
-                if (this.src.includes('es_LA')) {
-                    this.src = "https://connect.facebook.net/en_US/sdk.js";
-                    fjs.parentNode.insertBefore(this, fjs);
-                } else {
-                    updateStatus('error', 'No se pudo cargar el SDK de Facebook. Verifica tu conexión.');
-                }
-            };
-            fjs.parentNode.insertBefore(js, fjs);
-        }(document, 'script', 'facebook-jssdk'));
+        });
 
         // ============================================
         // ESCUCHAR EVENTOS DE EMBEDDED SIGNUP
@@ -401,8 +371,15 @@
             console.log('✅ Coexistence completado exitosamente');
             console.log('Datos recibidos:', data.data);
 
+            // Limpiar timeout
+            if (window.coexistenceTimeoutId) {
+                clearTimeout(window.coexistenceTimeoutId);
+            }
+
             const waba_id = data.data?.waba_id;
             const phone_number_id = data.data?.phone_number_id;
+
+            showLoading(false);
 
             updateStatus('success', `
                 ✅ <strong>Coexistence Activado!</strong><br>
@@ -425,6 +402,14 @@
 
         function handleCoexistenceError(data) {
             console.error('❌ Error en Coexistence:', data.data);
+
+            // Limpiar timeout
+            if (window.coexistenceTimeoutId) {
+                clearTimeout(window.coexistenceTimeoutId);
+            }
+
+            showLoading(false);
+
             updateStatus('error', `
                 ❌ <strong>Error:</strong><br>
                 ${data.data?.error_message || 'Error desconocido'}
@@ -433,46 +418,64 @@
 
         function handleCoexistenceCancel(data) {
             console.log('⚠️ Coexistence cancelado por usuario');
+
+            // Limpiar timeout
+            if (window.coexistenceTimeoutId) {
+                clearTimeout(window.coexistenceTimeoutId);
+            }
+
+            showLoading(false);
+
             updateStatus('waiting', 'Flujo cancelado. Puedes intentar de nuevo.');
         }
 
         // ============================================
-        // INICIAR FLUJO COEXISTENCE
+        // INICIAR FLUJO COEXISTENCE (v4 CORRECTO)
         // ============================================
 
         function initiateCoexistence() {
-            console.log('🚀 Iniciando flujo Coexistence...');
+            console.log('🚀 Iniciando flujo Coexistence v4 (CORRECTO - SIN FB.login)...');
 
-            if (!window.FB) {
-                updateStatus('error', 'SDK de Facebook no está listo. Recarga la página.');
+            showLoading(true);
+            updateStatus('waiting', 'Abriendo flujo de autorización de WhatsApp...');
+
+            // URL CORRECTA para Embedded Signup v4
+            // IMPORTANTE: NO usamos FB.login(), usamos directamente la URL del dialog
+            const embeddedSignupUrl = `https://www.facebook.com/dialog/whatsapp_embedded_signup?config_id=${CONFIG_ID}&app_id=${META_APP_ID}`;
+
+            console.log('📱 Abriendo popup de Embedded Signup v4...');
+            console.log('URL:', embeddedSignupUrl);
+
+            // Abrir popup - el postMessage listener escuchará los eventos
+            const popupWindow = window.open(
+                embeddedSignupUrl,
+                'WhatsApp_Embedded_Signup_v4',
+                'width=500,height=700,menubar=no,toolbar=no,status=no'
+            );
+
+            // Validar que el popup se abrió
+            if (!popupWindow) {
+                console.error('❌ No se pudo abrir el popup. Verifica si hay bloqueador de popups.');
+                updateStatus('error', 'No se pudo abrir el popup. Desactiva el bloqueador de popups e intenta de nuevo.');
+                showLoading(false);
                 return;
             }
 
-            showLoading(true);
-            updateStatus('waiting', 'Abriendo flujo de autorización...');
+            console.log('✅ Popup abierto. Esperando respuesta via postMessage...');
 
-            // Llamar a FB.login con configuración de Coexistence
-            FB.login((response) => {
-                console.log('FB.login response:', response);
-
-                if (response.authResponse) {
-                    console.log('✅ Autorización recibida');
-                    console.log('Code:', response.authResponse.code);
-                    // El evento WA_EMBEDDED_SIGNUP ya manejará el resto
+            // Timeout para detectar si el usuario cierra el popup sin completar
+            const timeoutId = setTimeout(() => {
+                if (popupWindow && !popupWindow.closed) {
+                    console.log('⏱️ Timeout - el popup está abierto pero sin respuesta');
                 } else {
-                    console.log('❌ Autorización rechazada');
-                    updateStatus('error', 'Autorización rechazada. Intenta de nuevo.');
+                    console.log('⚠️ El popup fue cerrado sin completar');
+                    updateStatus('waiting', 'Flujo cancelado. Intenta de nuevo.');
                     showLoading(false);
                 }
-            }, {
-                config_id: CONFIG_ID,
-                response_type: 'code',
-                override_default_response_type: true,
-                extras: {
-                    setup: {},
-                    featureType: 'whatsapp_business_app_onboarding'  // CRÍTICO: Esto activa Coexistence
-                }
-            });
+            }, 120000); // 2 minutos
+
+            // Guardar el timeout para limpiarlo si recibimos respuesta
+            window.coexistenceTimeoutId = timeoutId;
         }
 
         // ============================================
@@ -547,8 +550,8 @@
             });
         }
 
-        // Inicializar
-        console.log('🚀 Página cargada. Esperando que Facebook SDK se inicialice...');
+        // Página lista para Embedded Signup v4
+        console.log('🚀 Embedded Signup v4 listo. Config ID: ' + CONFIG_ID);
     </script>
 </body>
 </html>
