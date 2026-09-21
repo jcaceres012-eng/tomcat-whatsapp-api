@@ -493,6 +493,210 @@ app.get('/coexistence/callback', async (req, res) => {
 
 // ============================================
 // EMBEDDED SIGNUP - CALLBACK POST (desde JavaScript SDK)
+/**
+ * POST /coexistence/exchange-code
+ *
+ * Intercambia el código de autorización de FB.login con Meta Graph API.
+ * El código tiene un TTL de 30 segundos, por lo que debe ser enviado inmediatamente.
+ *
+ * Body esperado:
+ * {
+ *   code: "...",           // Código de autorización (30 segundos TTL)
+ *   timestamp: "..."       // Timestamp de cuando se recibió
+ * }
+ *
+ * Response:
+ * {
+ *   success: true,
+ *   waba_id: "...",
+ *   phone_number_id: "...",
+ *   business_token: "..."
+ * }
+ */
+app.post('/coexistence/exchange-code', async (req, res) => {
+  try {
+    const { code, timestamp } = req.body;
+
+    if (!code) {
+      return res.status(400).json({
+        success: false,
+        error: 'Missing authorization code',
+        message: 'Code field is required'
+      });
+    }
+
+    logEvent('COEXISTENCE_CODE_EXCHANGE_START', {
+      code: code.substring(0, 10) + '...',
+      timestamp
+    });
+
+    // Paso 1: Intercambiar código por access token
+    // CRÍTICO: Usar META_APP_SECRET en el backend, NUNCA en el frontend
+    console.log('🔷 Intercambiando código con Meta Graph API v25.0...');
+
+    const tokenExchangeResponse = await axios.post(
+      'https://graph.facebook.com/v25.0/oauth/access_token',
+      {
+        client_id: metaAppId,
+        client_secret: metaAppSecret,
+        code: code,
+        redirect_uri: `${webhookUrl}/coexistence/callback`
+      }
+    );
+
+    const { access_token, user_id } = tokenExchangeResponse.data;
+
+    if (!access_token) {
+      return res.status(400).json({
+        success: false,
+        error: 'Token exchange failed',
+        message: 'No access token received from Meta'
+      });
+    }
+
+    logEvent('COEXISTENCE_TOKEN_EXCHANGED', {
+      userId: user_id,
+      tokenLength: access_token.length
+    });
+
+    // Paso 2: Usar el access token para obtener WABA ID y phone_number_id
+    // Obtener detalles de la cuenta empresarial del usuario
+    const meResponse = await axios.get(
+      `https://graph.facebook.com/v25.0/me`,
+      {
+        params: {
+          fields: 'id,name,business_users',
+          access_token: access_token
+        }
+      }
+    );
+
+    logEvent('COEXISTENCE_USER_INFO_RETRIEVED', {
+      userId: meResponse.data.id,
+      name: meResponse.data.name
+    });
+
+    // Paso 3: Obtener WABAs asociadas a la cuenta del usuario
+    const wabasResponse = await axios.get(
+      `https://graph.facebook.com/v25.0/${meResponse.data.id}/whatsapp_business_accounts`,
+      {
+        params: {
+          access_token: access_token
+        }
+      }
+    );
+
+    if (!wabasResponse.data.data || wabasResponse.data.data.length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: 'No WABA found',
+        message: 'No WhatsApp Business Account found for this user'
+      });
+    }
+
+    const waba = wabasResponse.data.data[0];
+    const wabaId = waba.id;
+
+    logEvent('COEXISTENCE_WABA_FOUND', {
+      wabaId: wabaId,
+      wabaName: waba.name
+    });
+
+    // Paso 4: Obtener el phone_number_id del WABA
+    const phoneNumbersResponse = await axios.get(
+      `https://graph.facebook.com/v25.0/${wabaId}/phone_numbers`,
+      {
+        params: {
+          access_token: access_token
+        }
+      }
+    );
+
+    if (!phoneNumbersResponse.data.data || phoneNumbersResponse.data.data.length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: 'No phone numbers found',
+        message: 'No phone numbers registered for this WABA'
+      });
+    }
+
+    // Encontrar el número que coincide con TARGET_PHONE_NUMBER o usar el primero
+    let phoneData = phoneNumbersResponse.data.data.find(p => p.phone_number === targetPhoneNumber);
+    if (!phoneData) {
+      phoneData = phoneNumbersResponse.data.data[0];
+    }
+
+    const phoneNumberId = phoneData.id;
+    const phoneNumber = phoneData.phone_number;
+
+    logEvent('COEXISTENCE_PHONE_NUMBER_FOUND', {
+      phoneNumberId: phoneNumberId,
+      phoneNumber: phoneNumber,
+      wabaId: wabaId
+    });
+
+    // Paso 5: Almacenar los datos de Coexistence
+    coexistenceStore.phoneNumbers[phoneNumber] = {
+      phone: phoneNumber,
+      phone_number_id: phoneNumberId,
+      wabaId: wabaId,
+      businessPortfolioId,
+      status: 'active',
+      authorizedAt: new Date(),
+      coexistenceActive: true,
+      completedVia: 'embedded_signup_v4_fb_login',
+      capabilities: {
+        cloudApi: true,
+        businessApp: true,
+        messageSyncEnabled: true
+      },
+      businessToken: access_token.substring(0, 20) + '...' // Solo guardar los primeros caracteres
+    };
+
+    // Almacenar el token en memoria (read-only cache)
+    // En producción, esto debería estar en la base de datos encriptada
+    coexistenceStore.tokens[phoneNumberId] = access_token;
+
+    logEvent('COEXISTENCE_ACTIVATED_VIA_FB_LOGIN', {
+      phone: phoneNumber,
+      phone_number_id: phoneNumberId,
+      wabaId: wabaId,
+      method: 'FB.login() + Graph API'
+    });
+
+    // Respuesta exitosa al frontend
+    res.json({
+      success: true,
+      message: 'Coexistence completado exitosamente ✅',
+      phoneNumber: phoneNumber,
+      phone_number_id: phoneNumberId,
+      waba_id: wabaId,
+      status: 'active',
+      coexistenceActive: true,
+      features: {
+        cloudApi: 'Habilitado',
+        businessApp: 'Habilitado',
+        messageSyncEnabled: 'Activo'
+      }
+    });
+
+  } catch (error) {
+    console.error('❌ Error en exchange-code:', error.response?.data || error.message);
+
+    logEvent('COEXISTENCE_EXCHANGE_CODE_ERROR', {
+      error: error.message,
+      metaError: error.response?.data,
+      stack: error.stack
+    });
+
+    res.status(500).json({
+      success: false,
+      error: 'Code exchange failed',
+      message: error.response?.data?.error?.message || error.message
+    });
+  }
+});
+
 // ============================================
 
 /**
