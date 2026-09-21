@@ -277,241 +277,183 @@
             <div><strong>Configuración:</strong></div>
             <div>App ID: <span id="appIdDisplay">[cargando]</span></div>
             <div>Config ID: <span id="configIdDisplay">[cargando]</span></div>
-            <div>Versión: v4 Embedded Signup</div>
+            <div>Versión: v4 Embedded Signup (FB.login - OFICIAL)</div>
             <div>Tipo: Coexistence (WhatsApp Business App)</div>
         </div>
 
-        <span class="badge">✓ MÉTODO OFICIAL META v4</span>
+        <span class="badge">✓ MÉTODO OFICIAL META v4 (FB.login)</span>
 
         <div class="footer">
-            <p>Embedded Signup v4 - Coexistence oficial de Meta</p>
+            <p>Embedded Signup v4 - Coexistence oficial de Meta con FB.login()</p>
             <p>Para soporte: tech@tomcatstorehn.com</p>
         </div>
     </div>
 
+    <!-- Facebook SDK - REQUIRED for official Meta Embedded Signup v4 -->
+    <script async defer crossorigin="anonymous" src="https://connect.facebook.net/en_US/sdk.js"></script>
+
     <script>
         // ============================================
-        // CONFIGURACIÓN - COMPLETAR ANTES DE USAR
+        // CONFIGURATION
         // ============================================
 
-        // Tu Meta App ID (obtén de https://developers.facebook.com/apps)
-        const META_APP_ID = '949332344257619'; // COMPLETAR
-
-        // Facebook Login for Business Configuration ID
-        const CONFIG_ID = '1585556393220477'; // Ya configurado
-
-        // Backend callback URL
+        const META_APP_ID = '949332344257619';
+        const CONFIG_ID = '1585556393220477';
         const BACKEND_URL = 'https://tomcat-whatsapp-api.onrender.com';
 
         // ============================================
-        // INICIALIZACIÓN
+        // FACEBOOK SDK INITIALIZATION (OFFICIAL APPROACH)
         // ============================================
 
-        // Nota: Para Embedded Signup v4 NO necesitamos cargar el Facebook SDK
-        // ni usamos FB.login(). La comunicación es directa via window.open() y postMessage.
-        // Sin embargo, podríamos cargar el SDK para otras funcionalidades si es necesario.
+        // fbAsyncInit hook - called when Facebook SDK is ready
+        window.fbAsyncInit = function() {
+            console.log('🔷 Facebook SDK initializing...');
+            FB.init({
+                appId: META_APP_ID,
+                autoLogAppEvents: true,
+                xfbml: true,
+                version: 'v25.0'
+            });
+            console.log('✅ Facebook SDK initialized correctly');
+        };
 
+        // DOM Content Loaded
         window.addEventListener('DOMContentLoaded', function() {
-            console.log('✅ Página cargada. Embedded Signup v4 listo.');
+            console.log('✅ Page loaded. Embedded Signup v4 ready.');
             updateConfigDisplay();
         });
 
         // ============================================
-        // ESCUCHAR EVENTOS DE EMBEDDED SIGNUP
+        // OFFICIAL FB.LOGIN() CALLBACK
         // ============================================
 
-        window.addEventListener('message', (event) => {
-            // Validar origen
-            if (event.origin !== 'https://www.facebook.com' &&
-                event.origin !== 'https://web.facebook.com') {
-                return;
+        function fbLoginCallback(response) {
+            console.log('📞 FB.login() callback received:', response);
+
+            if (response.authResponse) {
+                const code = response.authResponse.code;
+                console.log('✅ Authorization code received from SDK (TTL: 30 seconds)');
+                console.log('Code (first 20 chars):', code.substring(0, 20) + '...');
+
+                showLoading(true);
+                updateStatus('waiting', 'Intercambiando código con servidor...');
+                sendAuthCodeToBackend(code);
+            } else {
+                console.error('❌ No authResponse from FB.login');
+                showLoading(false);
+                updateStatus('error', 'Error: Could not obtain authorization. Try again.');
             }
+        }
 
-            try {
-                const data = JSON.parse(event.data);
+        // ============================================
+        // SEND AUTHORIZATION CODE TO BACKEND
+        // ============================================
 
-                if (data.type !== 'WA_EMBEDDED_SIGNUP') {
-                    return;
+        function sendAuthCodeToBackend(code) {
+            console.log('📤 Sending authorization code to backend for exchange...');
+
+            fetch(`${BACKEND_URL}/coexistence/exchange-code`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    code: code,
+                    timestamp: new Date().toISOString()
+                })
+            })
+            .then(res => res.json())
+            .then(response => {
+                console.log('✅ Backend response:', response);
+
+                if (response.success) {
+                    showLoading(false);
+                    updateStatus('success', `
+                        ✅ <strong>Coexistence Activated!</strong><br>
+                        WABA ID: ${response.waba_id || '[obtained from backend]'}<br>
+                        Phone Number ID: ${response.phone_number_id || '[obtained from backend]'}<br>
+                        Status: ${response.status || 'active'}
+                    `);
+
+                    // Disable button to prevent multiple clicks
+                    document.getElementById('startBtn').disabled = true;
+                    document.getElementById('startBtn').textContent = 'Conectado ✓';
+                } else {
+                    showLoading(false);
+                    updateStatus('error', `Error: ${response.error || 'Could not complete exchange'}`);
                 }
-
-                console.log('📨 Evento Embedded Signup:', data);
-                handleEmbeddedSignupEvent(data);
-
-            } catch (e) {
-                console.error('Error parsing message:', e);
-            }
-        });
-
-        // ============================================
-        // MANEJO DE EVENTOS EMBEDDED SIGNUP
-        // ============================================
-
-        function handleEmbeddedSignupEvent(data) {
-            const eventName = String(data.event ?? '').toUpperCase();
-
-            switch(eventName) {
-                case 'FINISH_WHATSAPP_BUSINESS_APP_ONBOARDING':
-                    handleCoexistenceSuccess(data);
-                    break;
-
-                case 'ERROR':
-                    handleCoexistenceError(data);
-                    break;
-
-                case 'CANCEL':
-                    handleCoexistenceCancel(data);
-                    break;
-
-                default:
-                    console.log('📍 Evento:', eventName, data);
-            }
-        }
-
-        function handleCoexistenceSuccess(data) {
-            console.log('✅ Coexistence completado exitosamente');
-            console.log('Datos recibidos:', data.data);
-
-            // Limpiar timeout
-            if (window.coexistenceTimeoutId) {
-                clearTimeout(window.coexistenceTimeoutId);
-            }
-
-            const waba_id = data.data?.waba_id;
-            const phone_number_id = data.data?.phone_number_id;
-
-            showLoading(false);
-
-            updateStatus('success', `
-                ✅ <strong>Coexistence Activado!</strong><br>
-                WABA ID: ${waba_id || '[no disponible]'}<br>
-                Phone Number ID: ${phone_number_id || '[no disponible]'}
-            `);
-
-            // Enviar al backend para almacenar
-            sendToBackend({
-                event: 'FINISH_WHATSAPP_BUSINESS_APP_ONBOARDING',
-                waba_id,
-                phone_number_id,
-                timestamp: new Date().toISOString()
+            })
+            .catch(err => {
+                console.error('❌ Error sending code to backend:', err);
+                showLoading(false);
+                updateStatus('error', 'Connection error: ' + err.message);
             });
-
-            // Deshabilitar botón
-            document.getElementById('startBtn').disabled = true;
-            document.getElementById('startBtn').textContent = 'Conectado ✓';
-        }
-
-        function handleCoexistenceError(data) {
-            console.error('❌ Error en Coexistence:', data.data);
-
-            // Limpiar timeout
-            if (window.coexistenceTimeoutId) {
-                clearTimeout(window.coexistenceTimeoutId);
-            }
-
-            showLoading(false);
-
-            updateStatus('error', `
-                ❌ <strong>Error:</strong><br>
-                ${data.data?.error_message || 'Error desconocido'}
-            `);
-        }
-
-        function handleCoexistenceCancel(data) {
-            console.log('⚠️ Coexistence cancelado por usuario');
-
-            // Limpiar timeout
-            if (window.coexistenceTimeoutId) {
-                clearTimeout(window.coexistenceTimeoutId);
-            }
-
-            showLoading(false);
-
-            updateStatus('waiting', 'Flujo cancelado. Puedes intentar de nuevo.');
         }
 
         // ============================================
-        // INICIAR FLUJO COEXISTENCE (v4 CORRECTO)
+        // INITIATE COEXISTENCE (OFFICIAL FB.LOGIN APPROACH)
         // ============================================
 
         function initiateCoexistence() {
-            console.log('🚀 Iniciando flujo Coexistence v4 (CORRECTO - SIN FB.login)...');
+            console.log('🚀 Initiating Coexistence v4 (OFFICIAL - FB.login)...');
 
-            showLoading(true);
-            updateStatus('waiting', 'Abriendo flujo de autorización de WhatsApp...');
-
-            // URL CORRECTA para Embedded Signup v4
-            // IMPORTANTE: NO usamos FB.login(), usamos directamente la URL del dialog
-            const embeddedSignupUrl = `https://www.facebook.com/dialog/whatsapp_embedded_signup?config_id=${CONFIG_ID}&app_id=${META_APP_ID}`;
-
-            console.log('📱 Abriendo popup de Embedded Signup v4...');
-            console.log('URL:', embeddedSignupUrl);
-
-            // Abrir popup - el postMessage listener escuchará los eventos
-            const popupWindow = window.open(
-                embeddedSignupUrl,
-                'WhatsApp_Embedded_Signup_v4',
-                'width=500,height=700,menubar=no,toolbar=no,status=no'
-            );
-
-            // Validar que el popup se abrió
-            if (!popupWindow) {
-                console.error('❌ No se pudo abrir el popup. Verifica si hay bloqueador de popups.');
-                updateStatus('error', 'No se pudo abrir el popup. Desactiva el bloqueador de popups e intenta de nuevo.');
-                showLoading(false);
+            // Verify Facebook SDK is loaded
+            if (typeof FB === 'undefined') {
+                console.error('❌ Facebook SDK not loaded');
+                updateStatus('error', 'Facebook SDK not loaded. Please refresh the page.');
                 return;
             }
 
-            console.log('✅ Popup abierto. Esperando respuesta via postMessage...');
+            showLoading(true);
+            updateStatus('waiting', 'Opening WhatsApp authorization flow...');
 
-            // Timeout para detectar si el usuario cierra el popup sin completar
-            const timeoutId = setTimeout(() => {
-                if (popupWindow && !popupWindow.closed) {
-                    console.log('⏱️ Timeout - el popup está abierto pero sin respuesta');
-                } else {
-                    console.log('⚠️ El popup fue cerrado sin completar');
-                    updateStatus('waiting', 'Flujo cancelado. Intenta de nuevo.');
-                    showLoading(false);
+            console.log('🔑 Calling FB.login() with config_id...');
+
+            // OFFICIAL META APPROACH: Use FB.login() with config_id
+            FB.login(fbLoginCallback, {
+                config_id: CONFIG_ID,
+                response_type: 'code',
+                override_default_response_type: true,
+                extras: {
+                    setup: {}
                 }
-            }, 120000); // 2 minutos
-
-            // Guardar el timeout para limpiarlo si recibimos respuesta
-            window.coexistenceTimeoutId = timeoutId;
+            });
         }
 
         // ============================================
-        // VERIFICAR ESTADO
+        // CHECK STATUS
         // ============================================
 
         function checkStatus() {
-            console.log('🔍 Verificando estado...');
+            console.log('🔍 Checking status...');
             showLoading(true);
-            updateStatus('waiting', 'Verificando estado del servidor...');
+            updateStatus('waiting', 'Checking server status...');
 
             fetch(`${BACKEND_URL}/coexistence/status`)
                 .then(res => res.json())
                 .then(data => {
-                    console.log('Estado del servidor:', data);
+                    console.log('Server status:', data);
                     showLoading(false);
 
                     if (data.coexistenceActive) {
                         updateStatus('success', `
-                            ✅ <strong>Coexistence Activo</strong><br>
-                            Teléfono: ${data.phoneNumber}<br>
+                            ✅ <strong>Coexistence Active</strong><br>
+                            Phone: ${data.phoneNumber}<br>
                             WABA ID: ${data.wabaId}
                         `);
                     } else {
-                        updateStatus('waiting', 'Coexistence aún no está activado.');
+                        updateStatus('waiting', 'Coexistence not yet activated.');
                     }
                 })
                 .catch(err => {
-                    console.error('Error verificando estado:', err);
+                    console.error('Error checking status:', err);
                     showLoading(false);
-                    updateStatus('error', 'Error al verificar estado: ' + err.message);
+                    updateStatus('error', 'Error checking status: ' + err.message);
                 });
         }
 
         // ============================================
-        // FUNCIONES AUXILIARES
+        // HELPER FUNCTIONS
         // ============================================
 
         function showLoading(show) {
@@ -531,27 +473,11 @@
             document.getElementById('configIdDisplay').textContent = CONFIG_ID;
         }
 
-        function sendToBackend(data) {
-            console.log('📤 Enviando datos al backend:', data);
+        // ============================================
+        // INIT LOG
+        // ============================================
 
-            fetch(`${BACKEND_URL}/coexistence/callback`, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json'
-                },
-                body: JSON.stringify(data)
-            })
-            .then(res => res.json())
-            .then(response => {
-                console.log('✅ Backend response:', response);
-            })
-            .catch(err => {
-                console.error('❌ Error enviando al backend:', err);
-            });
-        }
-
-        // Página lista para Embedded Signup v4
-        console.log('🚀 Embedded Signup v4 listo. Config ID: ' + CONFIG_ID);
+        console.log('🚀 Embedded Signup v4 (FB.login Official) ready. App ID: ' + META_APP_ID);
     </script>
 </body>
 </html>
