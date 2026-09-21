@@ -323,12 +323,26 @@
             updateConfigDisplay();
         };
 
-        // Cargar SDK de Facebook
+        // Cargar SDK de Facebook con manejo mejorado de CORS
         (function(d, s, id) {
             var js, fjs = d.getElementsByTagName(s)[0];
             if (d.getElementById(id)) return;
-            js = d.createElement(s); js.id = id;
+            js = d.createElement(s);
+            js.id = id;
+            js.async = true;
+            js.defer = true;
             js.src = "https://connect.facebook.net/es_LA/sdk.js";
+            js.crossOrigin = "anonymous";
+            js.onerror = function() {
+                console.error('❌ Error cargando Facebook SDK desde connect.facebook.net. Intentando endpoint alternativo...');
+                // Intento alternativo con en_US si falla es_LA
+                if (this.src.includes('es_LA')) {
+                    this.src = "https://connect.facebook.net/en_US/sdk.js";
+                    fjs.parentNode.insertBefore(this, fjs);
+                } else {
+                    updateStatus('error', 'No se pudo cargar el SDK de Facebook. Verifica tu conexión.');
+                }
+            };
             fjs.parentNode.insertBefore(js, fjs);
         }(document, 'script', 'facebook-jssdk'));
 
