@@ -49,7 +49,11 @@ const port = process.env.PORT || 3000;
 const nodeEnv = process.env.NODE_ENV || 'development';
 
 // Meta API
-const metaAppId = (process.env.META_APP_ID || '949332344257619').trim();
+// ID público de la app "Tomcat Store" (el mismo que usa la página de Embedded Signup).
+// Se fija aquí porque la variable META_APP_ID en Render apuntaba a otra app ("Invalid Client ID").
+const EXPECTED_META_APP_ID = '949332344257619';
+const envMetaAppId = (process.env.META_APP_ID || '').trim();
+const metaAppId = EXPECTED_META_APP_ID;
 const metaAppSecret = (process.env.META_APP_SECRET || '').trim();
 const metaAccessToken = process.env.META_ACCESS_TOKEN;
 const businessPortfolioId = process.env.BUSINESS_PORTFOLIO_ID || '603733427671323';
@@ -640,6 +644,9 @@ app.post('/coexistence/exchange-code', async (req, res) => {
   } catch (error) {
     const metaError = error.response?.data?.error;
     logEvent('COEXISTENCE_EXCHANGE_CODE_ERROR', {
+      appIdUsed: metaAppId,
+      envMetaAppIdMatches: envMetaAppId === EXPECTED_META_APP_ID,
+      appSecretLength: metaAppSecret.length,
       status: error.response?.status || null,
       message: metaError?.message || error.message,
       code: metaError?.code || null,
