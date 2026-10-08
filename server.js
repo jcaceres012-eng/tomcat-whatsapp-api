@@ -3,7 +3,7 @@
  *
  * FUNCIONALIDAD:
  * ✅ Webhook receiver (Cloud API messages)
- * ✅ Meta Pixel Conversions API integration
+ * ✅ Meta Conversions API (business messaging / WhatsApp)
  * ✅ Embedded Signup flow (Hosted)
  * ✅ OAuth callback handling
  * ✅ Automatic Events API webhooks
@@ -31,6 +31,7 @@ const crypto = require('crypto');
 const path = require('path');
 const fs = require('fs');
 const { createPersistence } = require('./persistence');
+const { createCapi } = require('./capi');
 const app = express();
 
 app.use(express.json());
@@ -59,9 +60,11 @@ const targetPhoneNumber = process.env.TARGET_PHONE_NUMBER || '+50488447759';
 const verifyToken = process.env.VERIFY_TOKEN || 'tomcat_webhook_secure_token_v2';
 const webhookUrl = process.env.WEBHOOK_URL || 'https://tomcat-whatsapp-api.onrender.com';
 
-// Meta Pixel
-const pixelId = process.env.PIXEL_ID;
-const pixelAccessToken = process.env.PIXEL_ACCESS_TOKEN;
+// Meta Conversions API (mensajería de WhatsApp)
+// CAPI_DATASET_ID / CAPI_ACCESS_TOKEN tienen prioridad; PIXEL_ID / PIXEL_ACCESS_TOKEN se aceptan por compatibilidad.
+const capiDatasetId = process.env.CAPI_DATASET_ID || process.env.PIXEL_ID;
+const capiAccessToken = process.env.CAPI_ACCESS_TOKEN || process.env.PIXEL_ACCESS_TOKEN;
+const graphApiVersion = process.env.GRAPH_API_VERSION || 'v25.0';
 
 // Admin Security - MUST be set in environment variables
 const adminApiKey = process.env.ADMIN_API_KEY;
@@ -160,6 +163,19 @@ const logEvent = (type, data) => {
   }
   coexistenceStore.webhookEvents.push(logEntry);
 };
+
+// ============================================
+// META CONVERSIONS API (WhatsApp)
+// ============================================
+
+const capi = createCapi({
+  datasetId: capiDatasetId,
+  accessToken: capiAccessToken,
+  graphVersion: graphApiVersion,
+  testEventCode: process.env.CAPI_TEST_EVENT_CODE,
+  defaultWabaId: targetWabaId,
+  logger: logEvent
+});
 
 // ============================================
 // ENDPOINT: HEALTH CHECK
@@ -830,7 +846,7 @@ app.get('/coexistence/status', (req, res) => {
       cloudApi: 'Active ✅',
       businessApp: 'Active ✅',
       webhookReceiver: `Active at ${webhookUrl}/ ✅`,
-      pixelIntegration: pixelAccessToken ? 'Active ✅' : 'Not configured'
+      pixelIntegration: capi.enabled ? 'Active ✅' : 'Not configured'
     }
   });
 });
@@ -883,21 +899,30 @@ app.post('/', (req, res) => {
         const { messages, metadata } = value;
 
         messages?.forEach(async (message) => {
+          // No registrar teléfono completo ni texto: /webhooks/status es público
           logEvent('MESSAGE_RECEIVED', {
-            from: message.from,
+            from: capi.maskPhone(message.from),
             type: message.type,
             messageId: message.id,
             timestamp: message.timestamp,
             phoneNumberId: metadata.phone_number_id,
             coexistenceMode: true,
             source: message.from_me ? 'BUSINESS_APP' : 'CLOUD_API',
-            content: getMessageContent(message)
+            fromAd: Boolean(message.referral && message.referral.ctwa_clid)
           });
 
-          // Enviar a Meta Pixel
-          await sendPixelEvent('Contact', {
-            phone: message.from
-          });
+          // API de Conversiones: solo conversaciones iniciadas desde un anuncio clic a WhatsApp
+          if (!message.from_me) {
+            const click = capi.rememberClick(message, item.id);
+            if (click) {
+              await capi.sendEvent('LeadSubmitted', {
+                phone: message.from,
+                ctwaClid: click.ctwaClid,
+                wabaId: click.wabaId,
+                eventId: `lead_${message.id}`
+              });
+            }
+          }
         });
       }
 
@@ -910,7 +935,7 @@ app.post('/', (req, res) => {
             status: status.status,
             timestamp: status.timestamp,
             phoneNumberId: value.metadata?.phone_number_id,
-            recipientId: status.recipient_id
+            recipientId: capi.maskPhone(status.recipient_id)
           });
         });
       }
@@ -939,36 +964,51 @@ app.post('/', (req, res) => {
 });
 
 // ============================================
-// ENVÍO A META PIXEL
+// CONVERSIONES MANUALES (ventas cerradas por WhatsApp)
 // ============================================
 
-async function sendPixelEvent(eventName, userData, eventData = {}) {
-  if (!pixelId || !pixelAccessToken) return;
-
-  try {
-    const payload = {
-      data: [{
-        event_name: eventName,
-        event_time: Math.floor(Date.now() / 1000),
-        user_data: {
-          ph: userData.phone ?
-            crypto.createHash('sha256').update(userData.phone).digest('hex') : null
-        },
-        event_source_url: 'https://www.tomcatstorehn.com',
-        action_source: 'website'
-      }],
-      access_token: pixelAccessToken
-    };
-
-    await axios.post(
-      `https://graph.facebook.com/v18.0/${pixelId}/events`,
-      payload,
-      { timeout: 5000 }
-    );
-  } catch (error) {
-    // Log pero no falles
-  }
+function isAdminAuthorized(req) {
+  const providedKey = req.headers['x-admin-key'];
+  if (!adminApiKey || !providedKey) return false;
+  const a = Buffer.from(String(providedKey));
+  const b = Buffer.from(String(adminApiKey));
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
 }
+
+/**
+ * POST /conversions/event
+ * Header: x-admin-key: <ADMIN_API_KEY>
+ * Body: { "phone": "50499998888", "event": "Purchase", "value": 3700, "currency": "HNL" }
+ *
+ * Registra una venta (u otro evento admitido) de un cliente que llegó por un anuncio
+ * clic a WhatsApp en los últimos 7 días. "event" es opcional (por defecto Purchase).
+ */
+app.post('/conversions/event', async (req, res) => {
+  if (!isAdminAuthorized(req)) {
+    return res.status(401).json({ ok: false, error: 'unauthorized' });
+  }
+
+  const { phone, ctwa_clid: ctwaClid, event = 'Purchase', value, currency = 'HNL' } = req.body || {};
+  if (!phone && !ctwaClid) {
+    return res.status(400).json({ ok: false, error: 'phone_or_ctwa_clid_required' });
+  }
+
+  const result = await capi.sendEvent(event, { phone, ctwaClid, value, currency });
+  const httpStatus = result.ok ? 200
+    : result.reason === 'not_configured' ? 503
+    : result.reason === 'no_ctwa_clid' ? 404
+    : result.reason === 'meta_error' ? 502
+    : 400;
+  return res.status(httpStatus).json(result);
+});
+
+/**
+ * GET /conversions/status
+ * Estado de la integración (sin exponer credenciales).
+ */
+app.get('/conversions/status', (req, res) => {
+  res.json(capi.status());
+});
 
 // ============================================
 // UTILIDADES
@@ -1016,7 +1056,8 @@ app.get('/webhooks/status', (req, res) => {
     timestamp: new Date().toISOString(),
     configuration: {
       webhook: 'Configured',
-      metaPixel: pixelAccessToken ? 'Configured' : 'Not configured',
+      metaPixel: capi.enabled ? 'Configured' : 'Not configured',
+      conversionsApi: capi.status(),
       coexistence: metaAccessToken ? 'Ready' : 'Awaiting Embedded Signup'
     },
     activeSessions: Object.keys(coexistenceStore.sessions).length,
@@ -1407,7 +1448,7 @@ async function arrancar() {
             services: {
               webhookReceiver: 'Active',
               embeddedSignup: 'Ready',
-              pixelIntegration: pixelAccessToken ? 'Active' : 'Disabled',
+              pixelIntegration: capi.enabled ? 'Active' : 'Disabled',
               coexistenceTarget: targetPhoneNumber
             },
             endpoints: {
