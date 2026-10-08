@@ -317,6 +317,25 @@
             console.log('✅ Facebook SDK initialized correctly');
         };
 
+        // ============================================
+        // SESSION INFO (doc oficial): Meta envía waba_id / phone_number_id por postMessage
+        // ============================================
+        let sessionInfo = {};
+        window.addEventListener('message', (event) => {
+            if (!event.origin.endsWith('facebook.com')) return;
+            try {
+                const data = JSON.parse(event.data);
+                if (data.type === 'WA_EMBEDDED_SIGNUP') {
+                    sessionInfo = Object.assign({}, data.data || {}, { event: data.event });
+                    console.log('📨 Session info:', data.event, sessionInfo.waba_id || '');
+                    if (data.event === 'CANCEL') {
+                        showLoading(false);
+                        updateStatus('error', 'Proceso cancelado en el paso: ' + ((data.data && data.data.current_step) || 'desconocido'));
+                    }
+                }
+            } catch (e) { /* mensajes que no son JSON */ }
+        });
+
         // DOM Content Loaded
         window.addEventListener('DOMContentLoaded', function() {
             console.log('✅ Page loaded. Embedded Signup v4 ready.');
@@ -337,7 +356,7 @@
 
                 showLoading(true);
                 updateStatus('waiting', 'Intercambiando código con servidor...');
-                sendAuthCodeToBackend(code);
+                waitForSessionInfo(5000).then(() => sendAuthCodeToBackend(code));
             } else {
                 console.error('❌ No authResponse from FB.login');
                 showLoading(false);
@@ -349,6 +368,16 @@
         // SEND AUTHORIZATION CODE TO BACKEND
         // ============================================
 
+        function waitForSessionInfo(maxMs) {
+            return new Promise(resolve => {
+                const started = Date.now();
+                (function check() {
+                    if (sessionInfo.waba_id || Date.now() - started >= maxMs) return resolve();
+                    setTimeout(check, 250);
+                })();
+            });
+        }
+
         function sendAuthCodeToBackend(code) {
             console.log('📤 Sending authorization code to backend for exchange...');
 
@@ -359,7 +388,8 @@
                 },
                 body: JSON.stringify({
                     code: code,
-                    timestamp: new Date().toISOString()
+                    timestamp: new Date().toISOString(),
+                    session: sessionInfo
                 })
             })
             .then(res => res.json())
@@ -415,7 +445,8 @@
                 response_type: 'code',
                 override_default_response_type: true,
                 extras: {
-                    setup: {}
+                    setup: {},
+                    sessionInfoVersion: '3'
                 }
             });
         }

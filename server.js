@@ -49,15 +49,15 @@ const port = process.env.PORT || 3000;
 const nodeEnv = process.env.NODE_ENV || 'development';
 
 // Meta API
-const metaAppId = process.env.META_APP_ID;
-const metaAppSecret = process.env.META_APP_SECRET;
+const metaAppId = (process.env.META_APP_ID || '949332344257619').trim();
+const metaAppSecret = (process.env.META_APP_SECRET || '').trim();
 const metaAccessToken = process.env.META_ACCESS_TOKEN;
 const businessPortfolioId = process.env.BUSINESS_PORTFOLIO_ID || '603733427671323';
 const targetWabaId = process.env.TARGET_WABA_ID || '28291929163801429';
 const targetPhoneNumber = process.env.TARGET_PHONE_NUMBER || '+50488447759';
 
 // Webhook
-const verifyToken = process.env.VERIFY_TOKEN || 'tomcat_webhook_secure_token_v2';
+const verifyToken = (process.env.VERIFY_TOKEN || '').trim();
 const webhookUrl = process.env.WEBHOOK_URL || 'https://tomcat-whatsapp-api.onrender.com';
 
 // Meta Conversions API (mensajería de WhatsApp)
@@ -530,185 +530,125 @@ app.get('/coexistence/callback', async (req, res) => {
  * }
  */
 app.post('/coexistence/exchange-code', async (req, res) => {
+  const graph = `https://graph.facebook.com/${graphApiVersion}`;
   try {
-    const { code, timestamp } = req.body;
+    const { code, timestamp, session = {} } = req.body || {};
 
     if (!code) {
-      return res.status(400).json({
-        success: false,
-        error: 'Missing authorization code',
-        message: 'Code field is required'
-      });
+      return res.status(400).json({ success: false, error: 'Missing authorization code' });
     }
+    if (!metaAppId || !metaAppSecret) {
+      logEvent('COEXISTENCE_CONFIG_ERROR', { appIdSet: !!metaAppId, appSecretSet: !!metaAppSecret });
+      return res.status(500).json({ success: false, error: 'Server missing META_APP_ID / META_APP_SECRET' });
+    }
+
+    const sessionEvent = session.event || null;
+    let wabaId = session.waba_id || null;
+    let phoneNumberId = session.phone_number_id || null;
+    const isBusinessAppOnboarding = sessionEvent === 'FINISH_WHATSAPP_BUSINESS_APP_ONBOARDING';
 
     logEvent('COEXISTENCE_CODE_EXCHANGE_START', {
-      code: code.substring(0, 10) + '...',
-      timestamp
+      timestamp,
+      sessionEvent,
+      wabaId,
+      phoneNumberId
     });
 
-    // Paso 1: Intercambiar código por access token
-    // CRÍTICO: Usar META_APP_SECRET en el backend, NUNCA en el frontend
-    console.log('🔷 Intercambiando código con Meta Graph API v25.0...');
+    // Paso 1 (doc oficial Embedded Signup): GET /oauth/access_token con client_id, client_secret y code. Sin redirect_uri.
+    const tokenResponse = await axios.get(`${graph}/oauth/access_token`, {
+      params: { client_id: metaAppId, client_secret: metaAppSecret, code },
+      timeout: 15000
+    });
+    const businessToken = tokenResponse.data && tokenResponse.data.access_token;
+    if (!businessToken) {
+      return res.status(502).json({ success: false, error: 'No access token received from Meta' });
+    }
+    logEvent('COEXISTENCE_TOKEN_EXCHANGED', { tokenLength: businessToken.length });
 
-    const tokenExchangeResponse = await axios.post(
-      'https://graph.facebook.com/v25.0/oauth/access_token',
-      {
-        client_id: metaAppId,
-        client_secret: metaAppSecret,
-        code: code,
-        redirect_uri: `${webhookUrl}/coexistence/callback`
-      }
-    );
+    const auth = { headers: { Authorization: `Bearer ${businessToken}` }, timeout: 15000 };
 
-    const { access_token, user_id } = tokenExchangeResponse.data;
-
-    if (!access_token) {
+    if (!wabaId) {
+      logEvent('COEXISTENCE_NO_SESSION_INFO', { sessionEvent });
       return res.status(400).json({
         success: false,
-        error: 'Token exchange failed',
-        message: 'No access token received from Meta'
+        error: 'Meta no envió el ID de la cuenta de WhatsApp (session info). Repite el proceso sin cerrar la ventana de Meta antes de terminar.'
       });
     }
 
-    logEvent('COEXISTENCE_TOKEN_EXCHANGED', {
-      userId: user_id,
-      tokenLength: access_token.length
-    });
-
-    // Paso 2: Usar el access token para obtener WABA ID y phone_number_id
-    // Obtener detalles de la cuenta empresarial del usuario
-    const meResponse = await axios.get(
-      `https://graph.facebook.com/v25.0/me`,
-      {
-        params: {
-          fields: 'id,name,business_users',
-          access_token: access_token
-        }
-      }
-    );
-
-    logEvent('COEXISTENCE_USER_INFO_RETRIEVED', {
-      userId: meResponse.data.id,
-      name: meResponse.data.name
-    });
-
-    // Paso 3: Obtener WABAs asociadas a la cuenta del usuario
-    const wabasResponse = await axios.get(
-      `https://graph.facebook.com/v25.0/${meResponse.data.id}/whatsapp_business_accounts`,
-      {
-        params: {
-          access_token: access_token
-        }
-      }
-    );
-
-    if (!wabasResponse.data.data || wabasResponse.data.data.length === 0) {
-      return res.status(400).json({
-        success: false,
-        error: 'No WABA found',
-        message: 'No WhatsApp Business Account found for this user'
-      });
+    // Si el evento de coexistencia no trae phone_number_id, se obtiene de la WABA
+    if (!phoneNumberId) {
+      const pn = await axios.get(`${graph}/${wabaId}/phone_numbers`, auth);
+      const list = (pn.data && pn.data.data) || [];
+      const target = String(targetPhoneNumber || '').replace(/\D/g, '');
+      const match = list.find(p => String(p.display_phone_number || '').replace(/\D/g, '') === target) || list[0];
+      phoneNumberId = match ? match.id : null;
+    }
+    if (!phoneNumberId) {
+      return res.status(400).json({ success: false, error: 'No phone number found in WABA' });
     }
 
-    const waba = wabasResponse.data.data[0];
-    const wabaId = waba.id;
+    // Paso 2: suscribir la app a los webhooks de la WABA
+    await axios.post(`${graph}/${wabaId}/subscribed_apps`, {}, auth);
+    logEvent('COEXISTENCE_APP_SUBSCRIBED', { wabaId });
 
-    logEvent('COEXISTENCE_WABA_FOUND', {
-      wabaId: wabaId,
-      wabaName: waba.name
-    });
-
-    // Paso 4: Obtener el phone_number_id del WABA
-    const phoneNumbersResponse = await axios.get(
-      `https://graph.facebook.com/v25.0/${wabaId}/phone_numbers`,
-      {
-        params: {
-          access_token: access_token
+    // Paso 3: en coexistencia NO se registra el número (ya está registrado en la app). Se sincronizan contactos e historial (una sola vez, dentro de 24 h).
+    const sync = {};
+    if (isBusinessAppOnboarding) {
+      for (const syncType of ['smb_app_state_sync', 'history']) {
+        try {
+          const r = await axios.post(`${graph}/${phoneNumberId}/smb_app_data`,
+            { messaging_product: 'whatsapp', sync_type: syncType }, auth);
+          sync[syncType] = { ok: true, request_id: r.data && r.data.request_id };
+        } catch (e) {
+          sync[syncType] = { ok: false, message: e.response?.data?.error?.message || e.message };
         }
       }
-    );
-
-    if (!phoneNumbersResponse.data.data || phoneNumbersResponse.data.data.length === 0) {
-      return res.status(400).json({
-        success: false,
-        error: 'No phone numbers found',
-        message: 'No phone numbers registered for this WABA'
-      });
+      logEvent('COEXISTENCE_SYNC_REQUESTED', sync);
     }
 
-    // Encontrar el número que coincide con TARGET_PHONE_NUMBER o usar el primero
-    let phoneData = phoneNumbersResponse.data.data.find(p => p.phone_number === targetPhoneNumber);
-    if (!phoneData) {
-      phoneData = phoneNumbersResponse.data.data[0];
+    // Paso 4: guardar el token cifrado en la base de datos (nunca se devuelve al navegador)
+    let persisted = false;
+    if (persistence) {
+      try {
+        await persistence.persistTokenCritical(phoneNumberId, businessToken, null, 'business_token');
+        persisted = true;
+      } catch (e) {
+        logEvent('COEXISTENCE_TOKEN_PERSIST_ERROR', { message: e.message });
+      }
     }
-
-    const phoneNumberId = phoneData.id;
-    const phoneNumber = phoneData.phone_number;
-
-    logEvent('COEXISTENCE_PHONE_NUMBER_FOUND', {
-      phoneNumberId: phoneNumberId,
-      phoneNumber: phoneNumber,
-      wabaId: wabaId
-    });
-
-    // Paso 5: Almacenar los datos de Coexistence
-    coexistenceStore.phoneNumbers[phoneNumber] = {
-      phone: phoneNumber,
+    coexistenceStore.tokens[phoneNumberId] = businessToken;
+    coexistenceStore.phoneNumbers[phoneNumberId] = {
       phone_number_id: phoneNumberId,
-      wabaId: wabaId,
-      businessPortfolioId,
+      wabaId,
+      businessPortfolioId: session.business_id || businessPortfolioId,
       status: 'active',
       authorizedAt: new Date(),
-      coexistenceActive: true,
-      completedVia: 'embedded_signup_v4_fb_login',
-      capabilities: {
-        cloudApi: true,
-        businessApp: true,
-        messageSyncEnabled: true
-      },
-      businessToken: access_token.substring(0, 20) + '...' // Solo guardar los primeros caracteres
+      coexistenceActive: isBusinessAppOnboarding,
+      completedVia: sessionEvent || 'embedded_signup_v4'
     };
 
-    // Almacenar el token en memoria (read-only cache)
-    // En producción, esto debería estar en la base de datos encriptada
-    coexistenceStore.tokens[phoneNumberId] = access_token;
+    logEvent('COEXISTENCE_ACTIVATED', { wabaId, phoneNumberId, sessionEvent, persisted });
 
-    logEvent('COEXISTENCE_ACTIVATED_VIA_FB_LOGIN', {
-      phone: phoneNumber,
-      phone_number_id: phoneNumberId,
-      wabaId: wabaId,
-      method: 'FB.login() + Graph API'
-    });
-
-    // Respuesta exitosa al frontend
-    res.json({
+    return res.json({
       success: true,
-      message: 'Coexistence completado exitosamente ✅',
-      phoneNumber: phoneNumber,
-      phone_number_id: phoneNumberId,
       waba_id: wabaId,
-      status: 'active',
-      coexistenceActive: true,
-      features: {
-        cloudApi: 'Habilitado',
-        businessApp: 'Habilitado',
-        messageSyncEnabled: 'Activo'
-      }
+      phone_number_id: phoneNumberId,
+      coexistenceActive: isBusinessAppOnboarding,
+      sync,
+      persisted
     });
-
   } catch (error) {
-    console.error('❌ Error en exchange-code:', error.response?.data || error.message);
-
+    const metaError = error.response?.data?.error;
     logEvent('COEXISTENCE_EXCHANGE_CODE_ERROR', {
-      error: error.message,
-      metaError: error.response?.data,
-      stack: error.stack
+      status: error.response?.status || null,
+      message: metaError?.message || error.message,
+      code: metaError?.code || null,
+      subcode: metaError?.error_subcode || null,
+      fbtraceId: metaError?.fbtrace_id || null
     });
-
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
-      error: 'Code exchange failed',
-      message: error.response?.data?.error?.message || error.message
+      error: metaError?.message || 'Code exchange failed'
     });
   }
 });
@@ -858,7 +798,7 @@ app.get('/coexistence/status', (req, res) => {
 app.get('/', (req, res) => {
   const { 'hub.mode': mode, 'hub.verify_token': token, 'hub.challenge': challenge } = req.query;
 
-  if (mode === 'subscribe' && token === verifyToken) {
+  if (mode === 'subscribe' && verifyToken && token === verifyToken) {
     logEvent('WEBHOOK_VERIFIED', {
       mode,
       verifyTokenMatch: true,
@@ -867,9 +807,9 @@ app.get('/', (req, res) => {
     res.status(200).send(challenge);
   } else {
     logEvent('WEBHOOK_VERIFICATION_FAILED', {
-      receivedToken: token,
-      expectedToken: verifyToken,
       mode,
+      tokenReceived: Boolean(token),
+      tokenMatch: false,
       challenge: !!challenge
     });
     res.status(403).end();
