@@ -553,16 +553,41 @@ app.post('/coexistence/exchange-code', async (req, res) => {
 
     logEvent('COEXISTENCE_CODE_EXCHANGE_START', {
       timestamp,
+      sessionDebug: req.body.session_debug || null,
       sessionEvent,
       wabaId,
       phoneNumberId
     });
 
-    // Paso 1 (doc oficial Embedded Signup): GET /oauth/access_token con client_id, client_secret y code. Sin redirect_uri.
-    const tokenResponse = await axios.get(`${graph}/oauth/access_token`, {
-      params: { client_id: metaAppId, client_secret: metaAppSecret, code },
-      timeout: 15000
-    });
+    // Paso 1 (doc oficial Embedded Signup): GET /oauth/access_token con client_id, client_secret y code.
+    // Si Meta responde 36008 (redirect_uri distinto), se reintenta con las direcciones que el SDK pudo usar.
+    // Un intento rechazado por redirect_uri no consume el código.
+    const pageUrl = typeof req.body.page_url === 'string' && /^https:\/\/tomcat-whatsapp-api\.onrender\.com\//.test(req.body.page_url)
+      ? req.body.page_url.split('#')[0] : null;
+    const redirectCandidates = [undefined, '', pageUrl,
+      `${webhookUrl}/coexistence/start`, `${webhookUrl}/`, `${webhookUrl}/coexistence/callback`,
+      'https://www.facebook.com/connect/login_success.html']
+      .filter((v, i, a) => a.indexOf(v) === i && v !== null);
+    let tokenResponse = null;
+    let usedRedirect = null;
+    for (const candidate of redirectCandidates) {
+      const params = { client_id: metaAppId, client_secret: metaAppSecret, code };
+      if (candidate !== undefined) params.redirect_uri = candidate;
+      try {
+        tokenResponse = await axios.get(`${graph}/oauth/access_token`, { params, timeout: 15000 });
+        usedRedirect = candidate === undefined ? '(sin redirect_uri)' : (candidate || '(vacío)');
+        break;
+      } catch (e) {
+        const sub = e.response?.data?.error?.error_subcode;
+        if (sub !== 36008) throw e; // otro error: no seguir probando
+      }
+    }
+    if (!tokenResponse) {
+      const err = new Error('Ningún redirect_uri coincidió con el del diálogo de Meta (36008)');
+      err.response = { status: 400, data: { error: { message: err.message, code: 100, error_subcode: 36008 } } };
+      throw err;
+    }
+    logEvent('COEXISTENCE_REDIRECT_MATCH', { usedRedirect });
     const businessToken = tokenResponse.data && tokenResponse.data.access_token;
     if (!businessToken) {
       return res.status(502).json({ success: false, error: 'No access token received from Meta' });

@@ -321,10 +321,13 @@
         // SESSION INFO (doc oficial): Meta envía waba_id / phone_number_id por postMessage
         // ============================================
         let sessionInfo = {};
+        const sessionDebug = { fbMessages: 0, types: [] };
         window.addEventListener('message', (event) => {
             if (!event.origin.endsWith('facebook.com')) return;
+            sessionDebug.fbMessages++;
             try {
-                const data = JSON.parse(event.data);
+                const data = typeof event.data === 'string' ? JSON.parse(event.data) : event.data;
+                if (data && data.type && sessionDebug.types.length < 10) sessionDebug.types.push(data.type + (data.event ? ':' + data.event : ''));
                 if (data.type === 'WA_EMBEDDED_SIGNUP') {
                     sessionInfo = Object.assign({}, data.data || {}, { event: data.event });
                     console.log('📨 Session info:', data.event, sessionInfo.waba_id || '');
@@ -389,7 +392,9 @@
                 body: JSON.stringify({
                     code: code,
                     timestamp: new Date().toISOString(),
-                    session: sessionInfo
+                    session: sessionInfo,
+                    session_debug: sessionDebug,
+                    page_url: window.location.origin + window.location.pathname
                 })
             })
             .then(res => res.json())
