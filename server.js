@@ -1007,6 +1007,43 @@ app.post('/conversions/event', async (req, res) => {
  * GET /conversions/status
  * Estado de la integración (sin exponer credenciales).
  */
+/**
+ * GET /whatsapp/check
+ * Verifica que META_ACCESS_TOKEN puede leer el número y la cuenta de WhatsApp.
+ * Solo devuelve sí/no y datos públicos del número; nunca el token. Caché de 10 min.
+ */
+let waCheckCache = null;
+app.get('/whatsapp/check', async (req, res) => {
+  if (waCheckCache && Date.now() - waCheckCache.at < 10 * 60 * 1000) {
+    return res.json({ ...waCheckCache.result, cached: true });
+  }
+  const result = { tokenConfigured: Boolean(metaAccessToken), wabaId: targetWabaId };
+  if (!metaAccessToken) return res.json(result);
+  try {
+    const auth = { headers: { Authorization: `Bearer ${metaAccessToken}` }, timeout: 10000 };
+    const phones = await axios.get(`https://graph.facebook.com/${graphApiVersion}/${targetWabaId}/phone_numbers`,
+      { ...auth, params: { fields: 'id,display_phone_number,verified_name,platform_type,status,is_on_biz_app' } });
+    const list = (phones.data && phones.data.data) || [];
+    const target = String(targetPhoneNumber).replace(/\D/g, '');
+    const phone = list.find(p => String(p.display_phone_number).replace(/\D/g, '') === target) || list[0] || null;
+    result.wabaReadable = true;
+    result.phone = phone ? {
+      id: phone.id, display: phone.display_phone_number, name: phone.verified_name,
+      platform: phone.platform_type, status: phone.status, coexistence: Boolean(phone.is_on_biz_app)
+    } : null;
+    const tpl = await axios.get(`https://graph.facebook.com/${graphApiVersion}/${targetWabaId}/message_templates`,
+      { ...auth, params: { fields: 'name,status,category', limit: 50 } });
+    result.templates = ((tpl.data && tpl.data.data) || []).map(t => ({ name: t.name, status: t.status, category: t.category }));
+  } catch (error) {
+    const e = error.response && error.response.data && error.response.data.error;
+    result.wabaReadable = false;
+    result.error = e ? { code: e.code, subcode: e.error_subcode || null, message: String(e.message).slice(0, 160) } : { message: error.message };
+  }
+  waCheckCache = { at: Date.now(), result };
+  logEvent('WHATSAPP_CHECK', { tokenConfigured: result.tokenConfigured, wabaReadable: result.wabaReadable, errorCode: result.error && result.error.code });
+  res.json(result);
+});
+
 app.get('/conversions/status', async (req, res) => {
   res.json({ ...capi.status(), leadsBackend: leads.backend, leadsByStatus: await leads.counts() });
 });
