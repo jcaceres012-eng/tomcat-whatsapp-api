@@ -32,6 +32,7 @@ const path = require('path');
 const fs = require('fs');
 const { createPersistence } = require('./persistence');
 const { createCapi } = require('./capi');
+const { createLeads } = require('./leads');
 const app = express();
 
 app.use(express.json());
@@ -57,7 +58,7 @@ const metaAppId = EXPECTED_META_APP_ID;
 const metaAppSecret = (process.env.META_APP_SECRET || '').trim();
 const metaAccessToken = process.env.META_ACCESS_TOKEN;
 const businessPortfolioId = process.env.BUSINESS_PORTFOLIO_ID || '603733427671323';
-const targetWabaId = process.env.TARGET_WABA_ID || '28291929163801429';
+const targetWabaId = process.env.TARGET_WABA_ID || '1625519315763099';
 const targetPhoneNumber = process.env.TARGET_PHONE_NUMBER || '+50488447759';
 
 // Webhook
@@ -180,6 +181,9 @@ const capi = createCapi({
   defaultWabaId: targetWabaId,
   logger: logEvent
 });
+
+// Clientes potenciales y ventas (memoria hasta que la base esté lista)
+let leads = createLeads({ pool: null, capi, logger: logEvent });
 
 // ============================================
 // ENDPOINT: HEALTH CHECK
@@ -883,9 +887,9 @@ app.post('/', (req, res) => {
             fromAd: Boolean(message.referral && message.referral.ctwa_clid)
           });
 
-          // API de Conversiones: solo conversaciones iniciadas desde un anuncio clic a WhatsApp
+          // Registro del cliente + API de Conversiones (solo chats iniciados desde un anuncio)
           if (!message.from_me) {
-            const click = capi.rememberClick(message, item.id);
+            const click = await leads.onIncoming(message, item.id);
             if (click) {
               await capi.sendEvent('LeadSubmitted', {
                 phone: message.from,
@@ -896,6 +900,23 @@ app.post('/', (req, res) => {
             }
           }
         });
+      }
+
+      // ========== MENSAJES ENVIADOS DESDE LA APP (coexistencia) ==========
+      // Meta envía aquí lo que el negocio escribe desde WhatsApp Business en el celular.
+      // Un mensaje que empieza con "✅ Pedido confirmado" e incluye "Total: L 3,700"
+      // se registra como venta y se reporta como Purchase.
+      if (field === 'smb_message_echoes') {
+        const echoes = value.message_echoes || value.messages || [];
+        for (const echo of echoes) {
+          logEvent('BUSINESS_MESSAGE_SENT', {
+            to: capi.maskPhone(echo.to),
+            type: echo.type,
+            messageId: echo.id,
+            phoneNumberId: value.metadata && value.metadata.phone_number_id
+          });
+          await leads.onBusinessEcho(echo, item.id);
+        }
       }
 
       // ========== ESTADO DE MENSAJES ==========
@@ -965,7 +986,15 @@ app.post('/conversions/event', async (req, res) => {
     return res.status(400).json({ ok: false, error: 'phone_or_ctwa_clid_required' });
   }
 
-  const result = await capi.sendEvent(event, { phone, ctwaClid, value, currency });
+  let click = null;
+  if (!ctwaClid && phone) click = await leads.findClick(phone);
+  const result = await capi.sendEvent(event, {
+    phone,
+    ctwaClid: ctwaClid || (click && click.ctwaClid),
+    wabaId: click && click.wabaId,
+    value,
+    currency
+  });
   const httpStatus = result.ok ? 200
     : result.reason === 'not_configured' ? 503
     : result.reason === 'no_ctwa_clid' ? 404
@@ -978,8 +1007,24 @@ app.post('/conversions/event', async (req, res) => {
  * GET /conversions/status
  * Estado de la integración (sin exponer credenciales).
  */
-app.get('/conversions/status', (req, res) => {
-  res.json(capi.status());
+app.get('/conversions/status', async (req, res) => {
+  res.json({ ...capi.status(), leadsBackend: leads.backend, leadsByStatus: await leads.counts() });
+});
+
+/**
+ * GET /leads?limit=200   (header x-admin-key)
+ * Clientes potenciales y ventas registradas. Protegido: contiene teléfonos.
+ */
+app.get('/leads', async (req, res) => {
+  if (!isAdminAuthorized(req)) {
+    return res.status(401).json({ ok: false, error: 'unauthorized' });
+  }
+  const limit = Math.min(Number(req.query.limit) || 200, 1000);
+  try {
+    res.json({ ok: true, leads: await leads.list(limit) });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: 'leads_unavailable' });
+  }
 });
 
 // ============================================
@@ -1401,6 +1446,13 @@ async function arrancar() {
     console.log('\n[STARTUP] Inicializando persistencia...');
     await initPersistence();
     console.log('[STARTUP] Persistencia inicializada ✓');
+
+    if (persistence && persistence.pool) {
+      const pgLeads = createLeads({ pool: persistence.pool, capi, logger: logEvent });
+      await pgLeads.init();
+      leads = pgLeads;
+      logEvent('LEADS_READY', { backend: leads.backend });
+    }
 
     // Ahora sí, escuchar tráfico
     return new Promise((resolve) => {

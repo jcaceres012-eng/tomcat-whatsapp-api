@@ -162,7 +162,7 @@ function createPersistence({ databaseUrl, encryptionKey, logger }) {
 
   return { init, hydrate, persistTokenCritical, persistPhoneNumber, persistSession,
            removeSession, getTokenPlaintext, readiness, counts,
-           close: () => pool.end(), estado, keyFingerprint: store.keyFingerprint };
+           close: () => pool.end(), estado, keyFingerprint: store.keyFingerprint, pool };
 }
 
 module.exports = { createPersistence };
