@@ -126,8 +126,9 @@ function pgStore(pool) {
   };
 }
 
-function createLeads({ pool, capi, logger }) {
+function createLeads({ pool, capi, logger, sheets }) {
   const log = logger || (() => {});
+  const sheet = sheets || { push: async () => ({ ok: false }) };
   const store = pool ? pgStore(pool) : memoryStore();
   const seenSaleMessages = new Set();
 
@@ -137,12 +138,20 @@ function createLeads({ pool, capi, logger }) {
   }
 
   /** Mensaje entrante de un cliente. Guarda el clic del anuncio si lo trae. */
-  async function onIncoming(message, wabaId) {
+  async function onIncoming(message, wabaId, profileName) {
     const phone = capi.normalizePhone(message.from);
     if (!phone) return null;
     const click = capi.rememberClick(message, wabaId);
     if (click && message.referral && message.referral.headline) click.headline = String(message.referral.headline).slice(0, 200);
     await safe('upsertContact', () => store.upsertContact(phone, click));
+    sheet.push({
+      phone,
+      name: profileName ? String(profileName).slice(0, 80) : undefined,
+      adId: click ? click.adId : undefined,
+      adHeadline: click ? click.headline : undefined,
+      status: 'consulta',
+      lastMessageAt: message.timestamp ? new Date(Number(message.timestamp) * 1000).toISOString() : undefined
+    }, { force: Boolean(click) }).catch(() => {});
     return click;
   }
 
@@ -178,6 +187,10 @@ function createLeads({ pool, capi, logger }) {
       });
     }
     await safe('markSale', () => store.markSale(phone, { value: sale.value, messageId: echo.id, purchaseSent: result.ok }));
+    sheet.push({
+      phone, status: 'vendido', saleValue: sale.value, saleAt: new Date().toISOString(),
+      purchaseSent: Boolean(result.ok), adId: click ? click.adId : undefined
+    }, { force: true }).catch(() => {});
     log('SALE_DETECTED', {
       phone: capi.maskPhone(phone), value: sale.value, currency: 'HNL',
       fromAd: Boolean(click), purchaseSent: Boolean(result.ok), reason: result.ok ? undefined : result.reason

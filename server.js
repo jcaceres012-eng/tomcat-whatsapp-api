@@ -33,6 +33,7 @@ const fs = require('fs');
 const { createPersistence } = require('./persistence');
 const { createCapi } = require('./capi');
 const { createLeads } = require('./leads');
+const { createSheets } = require('./sheets');
 const app = express();
 
 app.use(express.json());
@@ -182,8 +183,11 @@ const capi = createCapi({
   logger: logEvent
 });
 
+// Registro en Google Sheets (opcional: SHEETS_WEBHOOK_URL + SHEETS_SECRET)
+const sheets = createSheets({ url: process.env.SHEETS_WEBHOOK_URL, secret: process.env.SHEETS_SECRET, logger: logEvent });
+
 // Clientes potenciales y ventas (memoria hasta que la base esté lista)
-let leads = createLeads({ pool: null, capi, logger: logEvent });
+let leads = createLeads({ pool: null, capi, logger: logEvent, sheets });
 
 // ============================================
 // ENDPOINT: HEALTH CHECK
@@ -873,6 +877,7 @@ app.post('/', (req, res) => {
       // ========== MENSAJES ENTRANTES ==========
       if (field === 'messages') {
         const { messages, metadata } = value;
+        const contactNames = Object.fromEntries((value.contacts || []).map(c => [c.wa_id, c.profile && c.profile.name]));
 
         messages?.forEach(async (message) => {
           // No registrar teléfono completo ni texto: /webhooks/status es público
@@ -889,7 +894,7 @@ app.post('/', (req, res) => {
 
           // Registro del cliente + API de Conversiones (solo chats iniciados desde un anuncio)
           if (!message.from_me) {
-            const click = await leads.onIncoming(message, item.id);
+            const click = await leads.onIncoming(message, item.id, contactNames[message.from]);
             if (click) {
               await capi.sendEvent('LeadSubmitted', {
                 phone: message.from,
@@ -1045,7 +1050,7 @@ app.get('/whatsapp/check', async (req, res) => {
 });
 
 app.get('/conversions/status', async (req, res) => {
-  res.json({ ...capi.status(), leadsBackend: leads.backend, leadsByStatus: await leads.counts() });
+  res.json({ ...capi.status(), leadsBackend: leads.backend, leadsByStatus: await leads.counts(), sheets: sheets.status() });
 });
 
 /**
@@ -1485,7 +1490,7 @@ async function arrancar() {
     console.log('[STARTUP] Persistencia inicializada ✓');
 
     if (persistence && persistence.pool) {
-      const pgLeads = createLeads({ pool: persistence.pool, capi, logger: logEvent });
+      const pgLeads = createLeads({ pool: persistence.pool, capi, logger: logEvent, sheets });
       await pgLeads.init();
       leads = pgLeads;
       logEvent('LEADS_READY', { backend: leads.backend });
