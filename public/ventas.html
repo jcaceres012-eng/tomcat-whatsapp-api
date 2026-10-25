@@ -37,15 +37,28 @@
 </main>
 <script>
   const f = document.getElementById('f'), out = document.getElementById('out'), b = document.getElementById('b');
+  // Igual que el servidor: "2,600.00", "2600", "2.600" y "2600,00" son L 2,600
+  const leerMonto = (raw) => {
+    let t = String(raw || '').replace(/[^0-9.,]/g, '').replace(/[.,]$/, '');
+    if (/^\d{1,3}(\.\d{3})+$/.test(t)) t = t.replace(/\./g, '');
+    else if (/^\d{1,3}(,\d{3})+(\.\d{1,2})?$/.test(t)) t = t.replace(/,/g, '');
+    else if (/^\d+,\d{1,2}$/.test(t)) t = t.replace(',', '.');
+    else t = t.replace(/,/g, '');
+    const n = Number(t); return Number.isFinite(n) && n > 0 ? Math.round(n * 100) / 100 : null;
+  };
   const show = (html, err) => { out.innerHTML = html; out.className = err ? 'err' : ''; out.style.display = 'block'; };
   f.addEventListener('submit', async (e) => {
     e.preventDefault();
+    const n = leerMonto(document.getElementById('v').value);
+    if (!n) return show('Monto inválido. Escríbelo así: 2600 o 2,600.00', true);
+    const texto = 'L ' + n.toLocaleString('es-HN', { minimumFractionDigits: 2 });
+    if (!confirm('¿Registrar una venta de ' + texto + '?')) return;
     b.disabled = true;
     try {
       const r = await fetch('/sales/manual', {
         method: 'POST',
         headers: { 'content-type': 'application/json', 'x-admin-key': document.getElementById('k').value },
-        body: JSON.stringify({ phone: document.getElementById('p').value, value: document.getElementById('v').value.replace(/,/g, '') })
+        body: JSON.stringify({ phone: document.getElementById('p').value, value: document.getElementById('v').value })
       });
       const j = await r.json();
       if (r.status === 401) return show('Clave incorrecta.', true);

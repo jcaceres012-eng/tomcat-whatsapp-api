@@ -32,7 +32,7 @@ const path = require('path');
 const fs = require('fs');
 const { createPersistence } = require('./persistence');
 const { createCapi } = require('./capi');
-const { createLeads } = require('./leads');
+const { createLeads, parseAmount } = require('./leads');
 const { createSheets } = require('./sheets');
 const app = express();
 
@@ -1066,8 +1066,8 @@ app.post('/sales/manual', async (req, res) => {
   const { phone, value } = req.body || {};
   const digits = String(phone || '').replace(/\D/g, '');
   if (digits.length < 8) return res.status(400).json({ ok: false, error: 'telefono_invalido' });
-  const amount = Number(String(value || '').replace(/[^0-9.]/g, ''));
-  if (!Number.isFinite(amount) || amount <= 0) return res.status(400).json({ ok: false, error: 'monto_invalido' });
+  const amount = parseAmount(String(value || '').replace(/[^0-9.,]/g, ''));
+  if (!amount || amount > 200000) return res.status(400).json({ ok: false, error: 'monto_invalido' });
   const saleId = `manual_${capi.normalizePhone(digits)}_${Math.round(amount * 100)}_${new Date().toISOString().slice(0, 10)}`;
   const result = await leads.recordSale(digits, amount, saleId, { source: 'manual' });
   res.status(result.ok ? 200 : 400).json(result);
