@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Registrar venta · Tomcat Store</title>
+<style>
+  :root { --bg:#0f0f10; --card:#1a1a1c; --text:#f2f2f2; --muted:#a0a0a6; --line:#2c2c30; --accent:#25d366; --err:#ff6b6b; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; background:var(--bg); color:var(--text); }
+  main { max-width: 420px; margin: 0 auto; padding: 32px 16px; }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  p.sub { color: var(--muted); margin: 0 0 24px; font-size: 14px; line-height: 1.4; }
+  label { display:block; font-size: 13px; color: var(--muted); margin: 16px 0 6px; }
+  input { width:100%; padding: 12px; font-size: 16px; border-radius: 10px; border:1px solid var(--line); background:var(--card); color:var(--text); }
+  button { margin-top: 22px; width:100%; padding: 14px; font-size: 16px; font-weight: 600; border:0; border-radius: 10px; background: var(--accent); color:#06290f; cursor:pointer; }
+  button:disabled { opacity: .6; cursor: default; }
+  #out { margin-top: 20px; padding: 14px; border-radius: 10px; background: var(--card); border:1px solid var(--line); display:none; line-height:1.5; font-size: 15px; }
+  #out.err { border-color: var(--err); }
+</style>
+</head>
+<body>
+<main>
+  <h1>Registrar venta</h1>
+  <p class="sub">Para ventas que no se detectaron con el mensaje “✅ Pedido confirmado”. Si el cliente llegó desde un anuncio en los últimos 7 días, la venta también se reporta a Meta.</p>
+  <form id="f" autocomplete="off">
+    <label for="k">Clave de administrador</label>
+    <input id="k" type="password" required autocomplete="off">
+    <label for="p">Teléfono del cliente</label>
+    <input id="p" inputmode="tel" placeholder="9999-8888" required>
+    <label for="v">Monto (L)</label>
+    <input id="v" inputmode="decimal" placeholder="2,600.00" required>
+    <button id="b" type="submit">Registrar venta</button>
+  </form>
+  <div id="out" role="status"></div>
+</main>
+<script>
+  const f = document.getElementById('f'), out = document.getElementById('out'), b = document.getElementById('b');
+  const show = (html, err) => { out.innerHTML = html; out.className = err ? 'err' : ''; out.style.display = 'block'; };
+  f.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    b.disabled = true;
+    try {
+      const r = await fetch('/sales/manual', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-admin-key': document.getElementById('k').value },
+        body: JSON.stringify({ phone: document.getElementById('p').value, value: document.getElementById('v').value.replace(/,/g, '') })
+      });
+      const j = await r.json();
+      if (r.status === 401) return show('Clave incorrecta.', true);
+      if (!j.ok) return show('No se pudo registrar: ' + (j.error || j.reason || 'error'), true);
+      if (j.duplicate) return show('Esta venta ya estaba registrada hoy.');
+      const monto = 'L ' + Number(j.value).toLocaleString('es-HN', { minimumFractionDigits: 2 });
+      show('✅ Venta de <b>' + monto + '</b> registrada.<br>' + (j.purchaseSent
+        ? 'El cliente vino de un anuncio: la venta se reportó a Meta.'
+        : (j.fromAd ? 'El cliente vino de un anuncio, pero Meta no aceptó el evento.' : 'El cliente no vino de un anuncio en los últimos 7 días: queda registrada, sin reporte a Meta.')));
+      document.getElementById('p').value = ''; document.getElementById('v').value = '';
+    } catch (_) {
+      show('Sin conexión con el servidor. Intenta de nuevo.', true);
+    } finally {
+      b.disabled = false;
+    }
+  });
+</script>
+</body>
+</html>

@@ -34,8 +34,8 @@ CREATE INDEX IF NOT EXISTS idx_leads_last_seen ON leads (last_seen);
 // Ventana de atribución de Meta para clic a WhatsApp
 const ATTRIBUTION_MS = 7 * 24 * 60 * 60 * 1000;
 
-// "✅ Pedido confirmado" al inicio (con o sin emoji, sin importar mayúsculas)
-const SALE_START = /^\s*(?:✅|✔️|✔)?\s*pedido\s+confirmado\b/i;
+// Una línea que empieza con "✅ Pedido confirmado" (con o sin emoji), en cualquier parte del mensaje.
+const SALE_LINE = /^\s*(?:✅|✔️|✔|☑️)?\s*\*?pedido\s+confirmado\b/i;
 // "Total: L 3,700" · "Total L. 3700.00" · "TOTAL: Lps 3.700" · "total: L3,700"
 const TOTAL_RE = /total\s*:?\s*(?:L|Lps|HNL)\.?\s*([0-9][0-9.,]*)/i;
 
@@ -53,10 +53,24 @@ function parseAmount(raw) {
 
 /** Devuelve { value } si el texto es un mensaje de venta confirmada, si no null. */
 function parseSaleMessage(text) {
-  if (!text || !SALE_START.test(text)) return null;
-  const m = TOTAL_RE.exec(text);
-  const value = m ? parseAmount(m[1]) : null;
-  return value ? { value } : null;
+  if (!text) return null;
+  const lines = String(text).split(/\r?\n/);
+  for (let i = 0; i < lines.length; i++) {
+    if (!SALE_LINE.test(lines[i])) continue;
+    // El total debe estar en la misma línea o en las 3 siguientes
+    const m = TOTAL_RE.exec(lines.slice(i, i + 4).join('\n'));
+    const value = m ? parseAmount(m[1]) : null;
+    if (value) return { value };
+  }
+  return null;
+}
+
+/** Texto de un mensaje del negocio: cuerpo de texto o descripción de foto/video/documento. */
+function messageText(msg) {
+  if (!msg) return null;
+  if (msg.type === 'text') return msg.text && msg.text.body;
+  const media = msg[msg.type];
+  return media && typeof media.caption === 'string' ? media.caption : null;
 }
 
 function memoryStore() {
@@ -169,42 +183,53 @@ function createLeads({ pool, capi, logger, sheets }) {
    * Mensaje enviado por el negocio desde la app (smb_message_echoes).
    * Si es una confirmación de venta, registra la venta y envía Purchase.
    */
-  async function onBusinessEcho(echo, wabaId) {
-    const text = echo && echo.type === 'text' && echo.text && echo.text.body;
-    const sale = parseSaleMessage(text);
-    if (!sale) return { sale: false };
-    if (seenSaleMessages.has(echo.id)) return { sale: true, duplicate: true };
-    seenSaleMessages.add(echo.id);
+  /** Registra una venta y, si el cliente vino de un anuncio, envía Purchase a Meta. */
+  async function recordSale(phoneRaw, value, saleId, { wabaId, source = 'whatsapp' } = {}) {
+    const phone = capi.normalizePhone(phoneRaw);
+    const amount = Number(value);
+    if (!phone || !Number.isFinite(amount) || amount <= 0) return { ok: false, reason: 'invalid_input' };
+    if (seenSaleMessages.has(saleId)) return { ok: true, sale: true, duplicate: true };
+    seenSaleMessages.add(saleId);
     if (seenSaleMessages.size > 5000) seenSaleMessages.clear();
 
-    const phone = capi.normalizePhone(echo.to);
     const click = await findClick(phone);
     let result = { ok: false, reason: 'no_ctwa_clid' };
     if (click) {
       result = await capi.sendEvent('Purchase', {
         phone, ctwaClid: click.ctwaClid, wabaId: click.wabaId || wabaId,
-        value: sale.value, currency: 'HNL', eventId: `purchase_${echo.id}`
+        value: amount, currency: 'HNL', eventId: `purchase_${saleId}`
       });
     }
-    await safe('markSale', () => store.markSale(phone, { value: sale.value, messageId: echo.id, purchaseSent: result.ok }));
+    await safe('markSale', () => store.markSale(phone, { value: amount, messageId: saleId, purchaseSent: result.ok }));
     sheet.push({
-      phone, status: 'vendido', saleValue: sale.value, saleAt: new Date().toISOString(),
+      phone, status: 'vendido', saleValue: amount, saleAt: new Date().toISOString(),
       purchaseSent: Boolean(result.ok), adId: click ? click.adId : undefined
     }, { force: true }).catch(() => {});
     log('SALE_DETECTED', {
-      phone: capi.maskPhone(phone), value: sale.value, currency: 'HNL',
+      phone: capi.maskPhone(phone), value: amount, currency: 'HNL', source,
       fromAd: Boolean(click), purchaseSent: Boolean(result.ok), reason: result.ok ? undefined : result.reason
     });
-    return { sale: true, value: sale.value, fromAd: Boolean(click), purchase: result };
+    return { ok: true, sale: true, value: amount, fromAd: Boolean(click), purchaseSent: Boolean(result.ok),
+      reason: result.ok ? undefined : result.reason };
+  }
+
+  /**
+   * Mensaje enviado por el negocio desde la app (smb_message_echoes).
+   * Si contiene "✅ Pedido confirmado … Total: L X" (texto o descripción de foto), registra la venta.
+   */
+  async function onBusinessEcho(echo, wabaId) {
+    const sale = parseSaleMessage(messageText(echo));
+    if (!sale) return { sale: false };
+    return recordSale(echo.to, sale.value, echo.id, { wabaId, source: 'whatsapp' });
   }
 
   return {
     init: () => store.init(),
-    onIncoming, onBusinessEcho, findClick,
+    onIncoming, onBusinessEcho, recordSale, findClick,
     list: (n) => store.list(n),
     counts: () => safe('counts', () => store.counts()),
     backend: pool ? 'postgres' : 'memory'
   };
 }
 
-module.exports = { createLeads, parseSaleMessage, parseAmount };
+module.exports = { createLeads, parseSaleMessage, parseAmount, messageText };

@@ -1054,6 +1054,31 @@ app.get('/conversions/status', async (req, res) => {
 });
 
 /**
+ * POST /sales/manual   (header x-admin-key)
+ * Body: { "phone": "9999-8888", "value": 2600 }
+ * Registra una venta que no se detectó en WhatsApp. Si el cliente llegó desde un
+ * anuncio en los últimos 7 días, también envía Purchase a Meta.
+ */
+app.post('/sales/manual', async (req, res) => {
+  if (!isAdminAuthorized(req)) {
+    return res.status(401).json({ ok: false, error: 'unauthorized' });
+  }
+  const { phone, value } = req.body || {};
+  const digits = String(phone || '').replace(/\D/g, '');
+  if (digits.length < 8) return res.status(400).json({ ok: false, error: 'telefono_invalido' });
+  const amount = Number(String(value || '').replace(/[^0-9.]/g, ''));
+  if (!Number.isFinite(amount) || amount <= 0) return res.status(400).json({ ok: false, error: 'monto_invalido' });
+  const saleId = `manual_${capi.normalizePhone(digits)}_${Math.round(amount * 100)}_${new Date().toISOString().slice(0, 10)}`;
+  const result = await leads.recordSale(digits, amount, saleId, { source: 'manual' });
+  res.status(result.ok ? 200 : 400).json(result);
+});
+
+/** GET /ventas — formulario para registrar ventas a mano (la clave la escribe el dueño, no se guarda). */
+app.get('/ventas', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'ventas.html'));
+});
+
+/**
  * GET /leads?limit=200   (header x-admin-key)
  * Clientes potenciales y ventas registradas. Protegido: contiene teléfonos.
  */
