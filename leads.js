@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS leads (
   sale_message_id TEXT,
   purchase_sent  BOOLEAN     NOT NULL DEFAULT false
 );
+ALTER TABLE leads ADD COLUMN IF NOT EXISTS name TEXT;
 CREATE INDEX IF NOT EXISTS idx_leads_status ON leads (status);
 CREATE INDEX IF NOT EXISTS idx_leads_last_seen ON leads (last_seen);
 `;
@@ -77,10 +78,11 @@ function memoryStore() {
   const rows = new Map();
   return {
     async init() {},
-    async upsertContact(phone, click) {
+    async upsertContact(phone, click, name) {
       const now = new Date();
       const r = rows.get(phone) || { phone, first_seen: now, status: 'consulta', purchase_sent: false };
       r.last_seen = now;
+      if (name) r.name = name;
       if (click) Object.assign(r, { ctwa_clid: click.ctwaClid, ad_id: click.adId, ad_headline: click.headline || null,
         click_at: now, waba_id: click.wabaId });
       rows.set(phone, r);
@@ -103,18 +105,19 @@ function memoryStore() {
 function pgStore(pool) {
   return {
     async init() { await pool.query(SCHEMA); },
-    async upsertContact(phone, click) {
+    async upsertContact(phone, click, name) {
+      // El nombre de perfil de WhatsApp se guarda/actualiza solo si viene en el mensaje
       if (click) {
         await pool.query(
-          `INSERT INTO leads (phone, ctwa_clid, ad_id, ad_headline, click_at, waba_id)
-           VALUES ($1,$2,$3,$4,now(),$5)
+          `INSERT INTO leads (phone, ctwa_clid, ad_id, ad_headline, click_at, waba_id, name)
+           VALUES ($1,$2,$3,$4,now(),$5,$6)
            ON CONFLICT (phone) DO UPDATE SET last_seen=now(), ctwa_clid=$2, ad_id=$3,
-             ad_headline=$4, click_at=now(), waba_id=$5`,
-          [phone, click.ctwaClid, click.adId || null, click.headline || null, click.wabaId || null]);
+             ad_headline=$4, click_at=now(), waba_id=$5, name=COALESCE($6, leads.name)`,
+          [phone, click.ctwaClid, click.adId || null, click.headline || null, click.wabaId || null, name || null]);
       } else {
         await pool.query(
-          `INSERT INTO leads (phone) VALUES ($1)
-           ON CONFLICT (phone) DO UPDATE SET last_seen=now()`, [phone]);
+          `INSERT INTO leads (phone, name) VALUES ($1,$2)
+           ON CONFLICT (phone) DO UPDATE SET last_seen=now(), name=COALESCE($2, leads.name)`, [phone, name || null]);
       }
     },
     async get(phone) {
@@ -157,7 +160,8 @@ function createLeads({ pool, capi, logger, sheets }) {
     if (!phone) return null;
     const click = capi.rememberClick(message, wabaId);
     if (click && message.referral && message.referral.headline) click.headline = String(message.referral.headline).slice(0, 200);
-    await safe('upsertContact', () => store.upsertContact(phone, click));
+    const name = profileName ? String(profileName).slice(0, 80) : null;
+    await safe('upsertContact', () => store.upsertContact(phone, click, name));
     sheet.push({
       phone,
       name: profileName ? String(profileName).slice(0, 80) : undefined,
