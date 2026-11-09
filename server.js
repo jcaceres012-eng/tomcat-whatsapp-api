@@ -36,7 +36,8 @@ const { createLeads, parseAmount } = require('./leads');
 const { createSheets } = require('./sheets');
 const app = express();
 
-app.use(express.json());
+// Guarda el cuerpo original para verificar la firma X-Hub-Signature-256 de Meta
+app.use(express.json({ verify: (req, res, buf) => { req.rawBody = buf; } }));
 
 // ============================================
 // STATIC FILES - Servir archivos públicos (HTML, CSS, JS)
@@ -860,8 +861,31 @@ app.get('/', (req, res) => {
 // WEBHOOK EVENTS (POST)
 // ============================================
 
+// Verificación de firma de Meta (X-Hub-Signature-256 = HMAC-SHA256 del cuerpo con el App Secret).
+// WEBHOOK_SIGNATURE_ENFORCE=true rechaza con 401 los POST sin firma válida.
+// Sin esa variable solo se mide (signatureStats en /webhooks/status) para confirmar
+// que META_APP_SECRET es el correcto antes de activarlo.
+const enforceSignature = String(process.env.WEBHOOK_SIGNATURE_ENFORCE || '').toLowerCase() === 'true';
+const signatureStats = { valid: 0, invalid: 0, missing: 0, noSecret: 0, lastInvalidAt: null };
+function checkMetaSignature(req) {
+  if (!metaAppSecret) { signatureStats.noSecret++; return 'no_secret'; }
+  const header = String(req.headers['x-hub-signature-256'] || '');
+  if (!header.startsWith('sha256=') || !req.rawBody) { signatureStats.missing++; return 'missing'; }
+  const expected = crypto.createHmac('sha256', metaAppSecret).update(req.rawBody).digest('hex');
+  const a = Buffer.from(header.slice(7), 'utf8');
+  const b = Buffer.from(expected, 'utf8');
+  if (a.length === b.length && crypto.timingSafeEqual(a, b)) { signatureStats.valid++; return 'valid'; }
+  signatureStats.invalid++; signatureStats.lastInvalidAt = new Date().toISOString();
+  return 'invalid';
+}
+
 app.post('/', (req, res) => {
-  const { entry } = req.body;
+  const sig = checkMetaSignature(req);
+  if (sig !== 'valid' && enforceSignature) {
+    logEvent('WEBHOOK_SIGNATURE_REJECTED', { reason: sig });
+    return res.status(401).end();
+  }
+  const { entry } = req.body || {};
 
   // Respuesta inmediata a Meta
   res.status(200).json({ success: true });
@@ -877,6 +901,17 @@ app.post('/', (req, res) => {
       // ========== MENSAJES ENTRANTES ==========
       if (field === 'messages') {
         const { messages, metadata } = value;
+        // Los estados (sent/delivered/read/failed) llegan dentro del campo "messages"
+        (value.statuses || []).forEach((status) => {
+          logEvent('MESSAGE_STATUS', {
+            messageId: status.id,
+            status: status.status,
+            timestamp: status.timestamp,
+            phoneNumberId: metadata && metadata.phone_number_id,
+            recipientId: capi.maskPhone(status.recipient_id),
+            errorCode: status.errors && status.errors[0] && status.errors[0].code
+          });
+        });
         const contactNames = Object.fromEntries((value.contacts || []).map(c => [c.wa_id, c.profile && c.profile.name]));
 
         messages?.forEach(async (message) => {
@@ -1140,6 +1175,7 @@ app.get('/webhooks/status', (req, res) => {
     timestamp: new Date().toISOString(),
     configuration: {
       webhook: 'Configured',
+      webhookSignature: { enforced: enforceSignature, secretConfigured: Boolean(metaAppSecret), ...signatureStats },
       metaPixel: capi.enabled ? 'Configured' : 'Not configured',
       conversionsApi: capi.status(),
       coexistence: metaAccessToken ? 'Ready' : 'Awaiting Embedded Signup'
