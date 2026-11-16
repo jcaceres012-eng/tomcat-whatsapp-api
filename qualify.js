@@ -99,9 +99,17 @@ function createQualifier({ getLeads, capi, accessToken, phoneNumberId, graphVers
     if (!on || !message || message.from_me) return false;
     const leads = getLeads();
     const to = message.from;
+    // Palabra clave de prueba: funciona para cualquier número, aunque ya sea cliente
+    if (isKeyword(message)) {
+      log('QUALIFY_TEST_START', { to: capi.maskPhone(to), mode: botMode });
+      await leads.setFields(to, { bot_step: STEPS.tipo });
+      return buttons(to, TEXTS.tipo, TIPO);
+    }
+
     const row = await leads.get(to);
-    if (row && row.status === 'vendido') return false;
     const step = row && row.bot_step;
+    // Una prueba en curso (iniciada con la palabra clave) sigue aunque el número sea de un cliente
+    if (row && row.status === 'vendido' && !step) return false;
 
     const id = replyId(message);
     if (id && id.startsWith('q_')) {
@@ -128,13 +136,6 @@ function createQualifier({ getLeads, capi, accessToken, phoneNumberId, graphVers
       await leads.qualify(to, { q_ciudad: message.text.body.slice(0, 60) }, { source: 'bot' });
       await leads.setFields(to, { bot_step: STEPS.fin });
       return text(to, TEXTS.fin);
-    }
-
-    // Palabra clave de prueba: reinicia y arranca la calificación (cualquier modo encendido)
-    if (isKeyword(message)) {
-      log('QUALIFY_TEST_START', { to: capi.maskPhone(to), mode: botMode });
-      await leads.setFields(to, { bot_step: STEPS.tipo });
-      return buttons(to, TEXTS.tipo, TIPO);
     }
 
     // Primer mensaje de un chat que viene de un anuncio: arranca la calificación (solo modo ads)
