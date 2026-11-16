@@ -13,7 +13,7 @@
   h1 { font-size: 22px; margin: 0 0 4px; }
   p.sub { color: var(--muted); margin: 0 0 24px; font-size: 14px; line-height: 1.4; }
   label { display:block; font-size: 13px; color: var(--muted); margin: 16px 0 6px; }
-  input { width:100%; padding: 12px; font-size: 16px; border-radius: 10px; border:1px solid var(--line); background:var(--card); color:var(--text); }
+  input, select { width:100%; padding: 12px; font-size: 16px; border-radius: 10px; border:1px solid var(--line); background:var(--card); color:var(--text); }
   button { margin-top: 22px; width:100%; padding: 14px; font-size: 16px; font-weight: 600; border:0; border-radius: 10px; background: var(--accent); color:#06290f; cursor:pointer; }
   button:disabled { opacity: .6; cursor: default; }
   #out { margin-top: 20px; padding: 14px; border-radius: 10px; background: var(--card); border:1px solid var(--line); display:none; line-height:1.5; font-size: 15px; }
@@ -23,14 +23,20 @@
 <body>
 <main>
   <h1>Registrar venta</h1>
-  <p class="sub">Para ventas que no se detectaron con el mensaje “✅ Pedido confirmado”. Si el cliente llegó desde un anuncio en los últimos 7 días, la venta también se reporta a Meta.</p>
+  <p class="sub">Para ventas que no se detectaron con el mensaje “✅ Pedido confirmado”. Registra el monto real cobrado. Si el cliente llegó desde un anuncio en los últimos 7 días, la venta también se reporta a Meta.</p>
   <form id="f" autocomplete="off">
     <label for="k">Clave de administrador</label>
     <input id="k" type="password" required autocomplete="off">
     <label for="p">Teléfono del cliente</label>
     <input id="p" inputmode="tel" placeholder="9999-8888" required>
-    <label for="v">Monto (L)</label>
+    <label for="v">Monto cobrado (L)</label>
     <input id="v" inputmode="decimal" placeholder="2,600.00" required>
+    <label for="m">Marca</label>
+    <select id="m"><option value="">Sin especificar</option><option>Invicta</option><option>Fossil</option><option>Casio</option><option>G-Shock</option><option>Pagani Design</option><option>Diesel</option><option>Bulova</option><option>Seiko</option><option>Otra</option></select>
+    <label for="mo">Modelo (opcional)</label>
+    <input id="mo" placeholder="Pro Diver 8926" maxlength="120">
+    <label for="o">Número de pedido (opcional, evita registrar la misma venta dos veces)</label>
+    <input id="o" placeholder="1045" maxlength="30">
     <button id="b" type="submit">Registrar venta</button>
   </form>
   <div id="out" role="status"></div>
@@ -58,7 +64,9 @@
       const r = await fetch('/sales/manual', {
         method: 'POST',
         headers: { 'content-type': 'application/json', 'x-admin-key': document.getElementById('k').value },
-        body: JSON.stringify({ phone: document.getElementById('p').value, value: document.getElementById('v').value })
+        body: JSON.stringify({ phone: document.getElementById('p').value, value: document.getElementById('v').value,
+          brand: document.getElementById('m').value || undefined, product: document.getElementById('mo').value || undefined,
+          orderId: document.getElementById('o').value || undefined })
       });
       const j = await r.json();
       if (r.status === 401) return show('Clave incorrecta.', true);
@@ -66,9 +74,9 @@
       if (j.duplicate) return show('Esta venta ya estaba registrada hoy.');
       const monto = 'L ' + Number(j.value).toLocaleString('es-HN', { minimumFractionDigits: 2 });
       show('✅ Venta de <b>' + monto + '</b> registrada.<br>' + (j.purchaseSent
-        ? 'El cliente vino de un anuncio: la venta se reportó a Meta.'
+        ? (j.channel === 'chat' ? 'Se reportó a Meta como compra por chat (teléfono cifrado).' : 'El cliente vino de un anuncio: la venta se reportó a Meta.')
         : (j.fromAd ? 'El cliente vino de un anuncio, pero Meta no aceptó el evento.' : 'El cliente no vino de un anuncio en los últimos 7 días: queda registrada, sin reporte a Meta.')));
-      document.getElementById('p').value = ''; document.getElementById('v').value = '';
+      ['p', 'v', 'mo', 'o'].forEach(function (i) { document.getElementById(i).value = ''; }); document.getElementById('m').value = '';
     } catch (_) {
       show('Sin conexión con el servidor. Intenta de nuevo.', true);
     } finally {

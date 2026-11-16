@@ -33,13 +33,45 @@ function normalizePhone(phone) {
   return digits || null;
 }
 
+// Eventos del sitio web que acepta el píxel / CAPI web
+const WEB_EVENTS = new Set(['PageView', 'ViewContent', 'Contact', 'Lead', 'InitiateCheckout', 'Purchase']);
+
+function sha256(value) {
+  return crypto.createHash('sha256').update(String(value).trim().toLowerCase()).digest('hex');
+}
+
+/** País ISO-2 en minúsculas a partir del prefijo, para user_data.country. */
+function countryOf(digits) {
+  if (/^504/.test(digits)) return 'hn';
+  if (/^1/.test(digits)) return 'us';
+  if (/^502/.test(digits)) return 'gt';
+  if (/^503/.test(digits)) return 'sv';
+  if (/^505/.test(digits)) return 'ni';
+  return 'hn';
+}
+
+/** Solo campos de custom_data admitidos y con longitudes razonables. */
+function cleanCustom(c) {
+  const out = {};
+  if (c.content_name) out.content_name = String(c.content_name).slice(0, 200);
+  if (c.content_category) out.content_category = String(c.content_category).slice(0, 100);
+  if (c.content_type) out.content_type = String(c.content_type).slice(0, 20);
+  if (c.order_id) out.order_id = String(c.order_id).slice(0, 100);
+  if (Array.isArray(c.content_ids)) out.content_ids = c.content_ids.slice(0, 20).map(x => String(x).slice(0, 100));
+  if (Array.isArray(c.contents)) out.contents = c.contents.slice(0, 20).map(x => ({ id: String(x.id).slice(0, 100), quantity: Number(x.quantity) || 1 }));
+  if (c.currency) out.currency = String(c.currency).slice(0, 3);
+  if (c.value !== undefined && Number.isFinite(Number(c.value))) out.value = Number(c.value);
+  if (c.lead_event_source) out.lead_event_source = String(c.lead_event_source).slice(0, 50);
+  return out;
+}
+
 function maskPhone(phone) {
   const p = normalizePhone(phone);
   if (!p) return null;
   return `${p.slice(0, 3)}****${p.slice(-2)}`;
 }
 
-function createCapi({ datasetId, accessToken, graphVersion = 'v25.0', testEventCode, defaultWabaId, logger }) {
+function createCapi({ datasetId, accessToken, graphVersion = 'v25.0', testEventCode, defaultWabaId, logger, allowHashedPhone = false }) {
   const log = logger || (() => {});
   const clicks = new Map(); // phone normalizado -> { ctwaClid, wabaId, adId, ts }
 
@@ -82,7 +114,7 @@ function createCapi({ datasetId, accessToken, graphVersion = 'v25.0', testEventC
    * Envía un evento a la API de Conversiones.
    * Nunca lanza excepción: devuelve { ok, ... } y registra el resultado.
    */
-  async function sendEvent(eventName, { phone, ctwaClid, wabaId, value, currency = 'HNL', eventId } = {}) {
+  async function sendEvent(eventName, { phone, ctwaClid, wabaId, value, currency = 'HNL', eventId, customData } = {}) {
     if (!enabled) {
       log('CAPI_SKIPPED', { reason: 'not_configured', eventName });
       return { ok: false, reason: 'not_configured' };
@@ -123,7 +155,13 @@ function createCapi({ datasetId, accessToken, graphVersion = 'v25.0', testEventC
       }
       event.custom_data = { currency, value: num };
     }
+    if (customData) event.custom_data = { ...(event.custom_data || {}), ...cleanCustom(customData) };
 
+    return post(event, { eventName, phone });
+  }
+
+  /** Envía un evento ya armado al conjunto de datos. Nunca lanza excepción. */
+  async function post(event, { eventName, phone } = {}) {
     const body = { data: [event] };
     if (testEventCode) body.test_event_code = testEventCode;
 
@@ -160,9 +198,66 @@ function createCapi({ datasetId, accessToken, graphVersion = 'v25.0', testEventC
     }
   }
 
+  /**
+   * Venta cerrada por WhatsApp sin clic de anuncio (cliente orgánico o recuperado).
+   * action_source "chat" con el teléfono cifrado SHA-256, como pide Meta.
+   * Solo se envía si CAPI_SEND_HASHED_PHONE=true: activarlo exige que el cliente
+   * haya autorizado el uso de sus datos para publicidad.
+   */
+  async function sendChatEvent(eventName, { phone, value, currency = 'HNL', eventId, customData } = {}) {
+    if (!enabled) return { ok: false, reason: 'not_configured' };
+    if (!allowHashedPhone) {
+      log('CAPI_SKIPPED', { reason: 'hashed_phone_disabled', eventName, phone: maskPhone(phone) });
+      return { ok: false, reason: 'hashed_phone_disabled' };
+    }
+    const ph = normalizePhone(phone);
+    if (!ph) return { ok: false, reason: 'no_phone' };
+    const event = {
+      event_name: eventName,
+      event_time: Math.floor(Date.now() / 1000),
+      event_id: eventId || crypto.randomUUID(),
+      action_source: 'chat',
+      user_data: { ph: [sha256(ph)], country: [sha256(countryOf(ph))] }
+    };
+    if (value !== undefined && value !== null && value !== '') {
+      const num = Number(value);
+      if (!Number.isFinite(num) || num < 0) return { ok: false, reason: 'invalid_value' };
+      event.custom_data = { currency, value: num };
+    }
+    if (customData) event.custom_data = { ...(event.custom_data || {}), ...cleanCustom(customData) };
+    return post(event, { eventName, phone });
+  }
+
+  /**
+   * Evento del sitio web enviado por servidor (Conversions API) con el mismo
+   * event_id que dispara el Píxel en el navegador: Meta deduplica los dos.
+   */
+  async function sendWebEvent(eventName, { eventId, eventSourceUrl, clientIp, userAgent, fbp, fbc, customData } = {}) {
+    if (!enabled) return { ok: false, reason: 'not_configured' };
+    if (!WEB_EVENTS.has(eventName)) return { ok: false, reason: 'unsupported_event' };
+    if (!eventId) return { ok: false, reason: 'event_id_required' };
+    const userData = {};
+    if (clientIp) userData.client_ip_address = String(clientIp);
+    if (userAgent) userData.client_user_agent = String(userAgent).slice(0, 400);
+    if (fbp) userData.fbp = String(fbp).slice(0, 200);
+    if (fbc) userData.fbc = String(fbc).slice(0, 300);
+    if (!userData.client_user_agent) return { ok: false, reason: 'user_agent_required' };
+    const event = {
+      event_name: eventName,
+      event_time: Math.floor(Date.now() / 1000),
+      event_id: String(eventId).slice(0, 100),
+      action_source: 'website',
+      event_source_url: eventSourceUrl ? String(eventSourceUrl).slice(0, 500) : undefined,
+      user_data: userData
+    };
+    if (customData) event.custom_data = cleanCustom(customData);
+    return post(event, { eventName });
+  }
+
   function status() {
     return {
       enabled,
+      hashedPhoneAllowed: allowHashedPhone,
       datasetConfigured: Boolean(datasetId),
       tokenConfigured: Boolean(accessToken),
       graphVersion,
@@ -171,7 +266,7 @@ function createCapi({ datasetId, accessToken, graphVersion = 'v25.0', testEventC
     };
   }
 
-  return { enabled, rememberClick, getClick, sendEvent, status, normalizePhone, maskPhone };
+  return { enabled, rememberClick, getClick, sendEvent, sendChatEvent, sendWebEvent, status, normalizePhone, maskPhone };
 }
 
-module.exports = { createCapi, normalizePhone, maskPhone, SUPPORTED_EVENTS };
+module.exports = { createCapi, normalizePhone, maskPhone, sha256, countryOf, cleanCustom, SUPPORTED_EVENTS, WEB_EVENTS };
