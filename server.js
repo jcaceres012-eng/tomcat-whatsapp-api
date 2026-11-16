@@ -193,7 +193,7 @@ const sheets = createSheets({ url: process.env.SHEETS_WEBHOOK_URL, secret: proce
 // Clientes potenciales y ventas (memoria hasta que la base esté lista)
 let leads = createLeads({ pool: null, capi, logger: logEvent, sheets });
 
-// Calificación comercial por botones (apagada salvo QUALIFY_BOT_ENABLED=true)
+// Calificación comercial por botones (QUALIFY_BOT_MODE=off|test|ads; QUALIFY_BOT_ENABLED=true = ads)
 const qualifier = createQualifier({
   getLeads: () => leads,
   capi,
@@ -201,6 +201,8 @@ const qualifier = createQualifier({
   phoneNumberId: process.env.WHATSAPP_PHONE_NUMBER_ID || '1382249958294998',
   graphVersion: graphApiVersion,
   enabled: process.env.QUALIFY_BOT_ENABLED === 'true',
+  mode: process.env.QUALIFY_BOT_MODE,
+  testKeyword: process.env.QUALIFY_TEST_KEYWORD,
   logger: logEvent
 });
 

@@ -8,9 +8,13 @@
  *   4. ¿A qué ciudad te lo enviamos? (texto libre)
  * "Esta semana" o "Este mes" marca el lead como calificado y envía QualifiedLead a Meta.
  *
- * Desactivado por defecto: QUALIFY_BOT_ENABLED=true lo enciende.
- * Solo responde a chats que traen el clic del anuncio (referral) y nunca a clientes que ya
- * compraron. Son respuestas dentro de la ventana de 24 h que abre el propio cliente: no son
+ * Modos (QUALIFY_BOT_MODE): off (por defecto) · test · ads.
+ *   test → solo arranca cuando alguien escribe la palabra clave de prueba (QUALIFY_TEST_KEYWORD,
+ *          por defecto "#probarbot"); nunca toca chats de anuncios. Sirve para probar sin
+ *          chocar con Meta Business Agent ni con clientes reales.
+ *   ads  → arranca en chats que traen el clic del anuncio (referral). QUALIFY_BOT_ENABLED=true
+ *          equivale a ads (compatibilidad). La palabra clave de prueba sigue funcionando.
+ * Nunca responde a clientes que ya compraron. Son respuestas dentro de la ventana de 24 h que abre el propio cliente: no son
  * mensajes masivos ni plantillas de marketing.
  */
 const axios = require('axios');
@@ -54,9 +58,19 @@ function replyId(message) {
   return null;
 }
 
-function createQualifier({ getLeads, capi, accessToken, phoneNumberId, graphVersion = 'v25.0', enabled = false, logger }) {
+function resolveMode(mode, enabled) {
+  const m = String(mode || '').trim().toLowerCase();
+  if (m === 'test' || m === 'ads' || m === 'off') return m;
+  return enabled ? 'ads' : 'off';
+}
+
+function createQualifier({ getLeads, capi, accessToken, phoneNumberId, graphVersion = 'v25.0', enabled = false, mode, testKeyword, logger }) {
   const log = logger || (() => {});
-  const on = Boolean(enabled && accessToken && phoneNumberId);
+  const botMode = resolveMode(mode, enabled);
+  const on = Boolean(botMode !== 'off' && accessToken && phoneNumberId);
+  const keyword = String(testKeyword || '#probarbot').trim().toLowerCase();
+  const isKeyword = (m) => Boolean(m && m.type === 'text' && m.text && m.text.body &&
+    m.text.body.trim().toLowerCase() === keyword);
 
   async function send(to, payload) {
     try {
@@ -116,15 +130,22 @@ function createQualifier({ getLeads, capi, accessToken, phoneNumberId, graphVers
       return text(to, TEXTS.fin);
     }
 
-    // Primer mensaje de un chat que viene de un anuncio: arranca la calificación
-    if (!step && click) {
+    // Palabra clave de prueba: reinicia y arranca la calificación (cualquier modo encendido)
+    if (isKeyword(message)) {
+      log('QUALIFY_TEST_START', { to: capi.maskPhone(to), mode: botMode });
+      await leads.setFields(to, { bot_step: STEPS.tipo });
+      return buttons(to, TEXTS.tipo, TIPO);
+    }
+
+    // Primer mensaje de un chat que viene de un anuncio: arranca la calificación (solo modo ads)
+    if (botMode === 'ads' && !step && click) {
       await leads.setFields(to, { bot_step: STEPS.tipo });
       return buttons(to, TEXTS.tipo, TIPO);
     }
     return false;
   }
 
-  return { onIncoming, status: () => ({ enabled: on }) };
+  return { onIncoming, status: () => ({ enabled: on, mode: on ? botMode : 'off' }) };
 }
 
-module.exports = { createQualifier, TEXTS, TIPO, MARCAS, CUANDO };
+module.exports = { createQualifier, resolveMode, TEXTS, TIPO, MARCAS, CUANDO };
