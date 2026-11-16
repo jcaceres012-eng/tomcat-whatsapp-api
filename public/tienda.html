@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tomcat Store · Relojes originales en Honduras</title>
+<meta name="description" content="Relojes Invicta, Fossil, Casio, G-Shock, Pagani Design, Diesel y Bulova. Envío gratis a toda Honduras y pago contra entrega.">
+<style>
+  :root { --bg:#0e0e0f; --card:#18181a; --text:#f4f4f4; --muted:#a3a3aa; --line:#2a2a2e; --gold:#c9a24a; --wa:#25d366; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; background:var(--bg); color:var(--text); }
+  main { max-width: 720px; margin: 0 auto; padding: 28px 16px 48px; }
+  .brand { letter-spacing:.18em; font-size:13px; color:var(--gold); text-transform:uppercase; }
+  h1 { font-size: 28px; line-height:1.2; margin: 8px 0 10px; }
+  p.lead { color: var(--muted); margin: 0 0 18px; line-height:1.5; }
+  .chips { display:flex; flex-wrap:wrap; gap:8px; margin: 0 0 22px; }
+  .chip { border:1px solid var(--line); border-radius:999px; padding:6px 12px; font-size:13px; color:var(--text); }
+  .btn { display:inline-flex; align-items:center; justify-content:center; gap:8px; width:100%; padding:14px; border:0; border-radius:12px;
+         font-size:16px; font-weight:600; cursor:pointer; text-decoration:none; }
+  .wa { background: var(--wa); color:#06290f; }
+  .ghost { background: transparent; color: var(--text); border:1px solid var(--line); }
+  h2 { font-size: 18px; margin: 30px 0 12px; }
+  .grid { display:grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap:12px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:16px; }
+  .card h3 { margin:0 0 6px; font-size:17px; }
+  .card p { margin:0 0 12px; color:var(--muted); font-size:14px; line-height:1.4; }
+  .more { display:none; margin-top:10px; }
+  .card.open .more { display:block; }
+  .steps { counter-reset: s; list-style:none; padding:0; margin:0; }
+  .steps li { counter-increment: s; padding: 10px 0 10px 40px; position:relative; border-bottom:1px solid var(--line); color:var(--muted); }
+  .steps li::before { content: counter(s); position:absolute; left:0; top:8px; width:28px; height:28px; border-radius:50%;
+    background:var(--card); border:1px solid var(--line); color:var(--gold); display:flex; align-items:center; justify-content:center; font-weight:600; }
+  footer { margin-top: 34px; color: var(--muted); font-size: 12px; line-height:1.5; }
+</style>
+</head>
+<body>
+<main>
+  <div class="brand">Tomcat Store</div>
+  <h1>Relojes originales con envío gratis a toda Honduras</h1>
+  <p class="lead">Elige tu marca, te enviamos fotos reales y precio por WhatsApp. No pagas nada por adelantado: pagas en efectivo cuando recibes tu reloj.</p>
+  <div class="chips"><span class="chip">🚚 Envío gratis</span><span class="chip">💵 Pago contra entrega</span><span class="chip">🇭🇳 Tienda hondureña desde 2021</span></div>
+  <a class="btn wa" href="#" data-contact="General">Escribir por WhatsApp</a>
+
+  <h2>Marcas</h2>
+  <div class="grid" id="marcas"></div>
+
+  <h2>Cómo comprar</h2>
+  <ol class="steps">
+    <li>Escríbenos por WhatsApp con la marca o la foto del reloj que te gusta.</li>
+    <li>Te enviamos fotos reales, características y precio.</li>
+    <li>Nos das tu nombre, teléfono, ciudad y dirección.</li>
+    <li>Recibes tu reloj, lo revisas y pagas en efectivo.</li>
+  </ol>
+
+  <footer>Usamos el píxel de Meta para medir qué anuncios ayudan a los clientes a encontrarnos. No pedimos datos personales en esta página.</footer>
+</main>
+<script src="/tienda/config.js"></script>
+<script>
+(function () {
+  var cfg = window.TOMCAT || {};
+  var MARCAS = [
+    ['Invicta', 'Relojes grandes y llamativos: Pro Diver, Speedway, Bolt y más.'],
+    ['Fossil', 'Diseño clásico y moderno, para hombre y mujer.'],
+    ['Casio / G-Shock', 'Resistentes, deportivos y para el día a día.'],
+    ['Pagani Design', 'Estilo de lujo automático a buen precio.'],
+    ['Diesel', 'Caja grande y estilo urbano.'],
+    ['Bulova', 'Elegancia y precisión para ocasiones especiales.']
+  ];
+
+  // Identificador compartido por el píxel y el servidor: Meta cuenta el evento una sola vez
+  function newId(name) { return name + '_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 10); }
+  function cookie(n) { var m = document.cookie.match('(?:^|; )' + n + '=([^;]*)'); return m ? decodeURIComponent(m[1]) : undefined; }
+  function track(event, content) {
+    var id = newId(event);
+    var data = content ? { content_name: content, content_category: content, content_type: 'product' } : {};
+    if (window.fbq) window.fbq('track', event, data, { eventID: id });
+    try {
+      fetch('/capi/web', { method: 'POST', keepalive: true, headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ event: event, eventId: id, url: location.href, fbp: cookie('_fbp'), fbc: cookie('_fbc'), content: content }) });
+    } catch (e) {}
+  }
+  function waLink(brand) {
+    var t = brand === 'General' ? 'Hola, quiero ver relojes disponibles' : 'Hola, quiero ver modelos ' + brand + ' disponibles';
+    return 'https://wa.me/' + (cfg.whatsapp || '50488447759') + '?text=' + encodeURIComponent(t);
+  }
+
+  // Píxel de Meta (código base oficial)
+  if (cfg.pixelId) {
+    !function(f,b,e,v,n,t,s){if(f.fbq)return;n=f.fbq=function(){n.callMethod?n.callMethod.apply(n,arguments):n.queue.push(arguments)};
+    if(!f._fbq)f._fbq=n;n.push=n;n.loaded=!0;n.version='2.0';n.queue=[];t=b.createElement(e);t.async=!0;
+    t.src=v;s=b.getElementsByTagName(e)[0];s.parentNode.insertBefore(t,s)}(window, document,'script','https://connect.facebook.net/en_US/fbevents.js');
+    window.fbq('init', cfg.pixelId);
+  }
+  track('PageView');
+
+  var grid = document.getElementById('marcas');
+  MARCAS.forEach(function (m) {
+    var card = document.createElement('div'); card.className = 'card';
+    var h = document.createElement('h3'); h.textContent = m[0];
+    var p = document.createElement('p'); p.textContent = m[1];
+    var ver = document.createElement('button'); ver.className = 'btn ghost'; ver.textContent = 'Ver modelos';
+    var more = document.createElement('div'); more.className = 'more';
+    var a = document.createElement('a'); a.className = 'btn wa'; a.href = '#'; a.textContent = 'Pedir fotos y precio'; a.setAttribute('data-contact', m[0]);
+    more.appendChild(a);
+    ver.addEventListener('click', function () { if (!card.classList.contains('open')) { card.classList.add('open'); track('ViewContent', m[0]); } });
+    card.appendChild(h); card.appendChild(p); card.appendChild(ver); card.appendChild(more); grid.appendChild(card);
+  });
+
+  document.addEventListener('click', function (e) {
+    var el = e.target.closest('[data-contact]');
+    if (!el) return;
+    e.preventDefault();
+    var brand = el.getAttribute('data-contact');
+    track('Contact', brand === 'General' ? undefined : brand);
+    setTimeout(function () { location.href = waLink(brand); }, 250);
+  });
+})();
+</script>
+</body>
+</html>

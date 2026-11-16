@@ -34,6 +34,7 @@ const { createPersistence } = require('./persistence');
 const { createCapi } = require('./capi');
 const { createLeads, parseAmount } = require('./leads');
 const { createSheets } = require('./sheets');
+const { createQualifier } = require('./qualify');
 const app = express();
 
 // Guarda el cuerpo original para verificar la firma X-Hub-Signature-256 de Meta
@@ -181,7 +182,9 @@ const capi = createCapi({
   graphVersion: graphApiVersion,
   testEventCode: process.env.CAPI_TEST_EVENT_CODE,
   defaultWabaId: targetWabaId,
-  logger: logEvent
+  logger: logEvent,
+  // Ventas sin clic de anuncio con teléfono cifrado: solo con autorización de los clientes
+  allowHashedPhone: process.env.CAPI_SEND_HASHED_PHONE === 'true'
 });
 
 // Registro en Google Sheets (opcional: SHEETS_WEBHOOK_URL + SHEETS_SECRET)
@@ -189,6 +192,20 @@ const sheets = createSheets({ url: process.env.SHEETS_WEBHOOK_URL, secret: proce
 
 // Clientes potenciales y ventas (memoria hasta que la base esté lista)
 let leads = createLeads({ pool: null, capi, logger: logEvent, sheets });
+
+// Calificación comercial por botones (apagada salvo QUALIFY_BOT_ENABLED=true)
+const qualifier = createQualifier({
+  getLeads: () => leads,
+  capi,
+  accessToken: metaAccessToken,
+  phoneNumberId: process.env.WHATSAPP_PHONE_NUMBER_ID || '1382249958294998',
+  graphVersion: graphApiVersion,
+  enabled: process.env.QUALIFY_BOT_ENABLED === 'true',
+  logger: logEvent
+});
+
+// Píxel del sitio: el mismo conjunto de datos que recibe los eventos de WhatsApp
+const webPixelId = process.env.WEB_PIXEL_ID || capiDatasetId || '';
 
 // ============================================
 // ENDPOINT: HEALTH CHECK
@@ -938,6 +955,7 @@ app.post('/', (req, res) => {
                 eventId: `lead_${message.id}`
               });
             }
+            await qualifier.onIncoming(message, click).catch((e) => logEvent('QUALIFY_ERROR', { message: e.message }));
           }
         });
       }
@@ -1085,7 +1103,74 @@ app.get('/whatsapp/check', async (req, res) => {
 });
 
 app.get('/conversions/status', async (req, res) => {
-  res.json({ ...capi.status(), leadsBackend: leads.backend, leadsByStatus: await leads.counts(), sheets: sheets.status() });
+  res.json({ ...capi.status(), leadsBackend: leads.backend, leadsByStatus: await leads.counts(), sheets: sheets.status(),
+    qualifyBot: qualifier.status(), webPixel: Boolean(webPixelId) });
+});
+
+/**
+ * POST /leads/qualify   (header x-admin-key)
+ * Body: { "phone": "9999-8888", "tipo": "hombre", "marca": "Invicta", "modelo": "Pro Diver",
+ *         "cuando": "esta_semana" | "este_mes" | "viendo", "ciudad": "San Pedro Sula" }
+ * Para que el asesor califique un chat a mano. "esta_semana" o "este_mes" = lead calificado.
+ */
+app.post('/leads/qualify', async (req, res) => {
+  if (!isAdminAuthorized(req)) return res.status(401).json({ ok: false, error: 'unauthorized' });
+  const b = req.body || {};
+  const cuando = ['esta_semana', 'este_mes', 'viendo'].includes(b.cuando) ? b.cuando : undefined;
+  const result = await leads.qualify(b.phone, {
+    q_tipo: b.tipo, q_marca: b.marca, q_modelo: b.modelo, q_cuando: cuando, q_ciudad: b.ciudad
+  }, { source: 'asesor' });
+  res.status(result.ok ? 200 : 400).json(result);
+});
+
+/** GET /sales (header x-admin-key) — ventas registradas, una fila por venta. */
+app.get('/sales', async (req, res) => {
+  if (!isAdminAuthorized(req)) return res.status(401).json({ ok: false, error: 'unauthorized' });
+  const limit = Math.min(Number(req.query.limit) || 200, 1000);
+  res.json({ ok: true, sales: (await leads.listSales(limit)) || [] });
+});
+
+// ============================================
+// SITIO: PÍXEL + CONVERSIONS API CON DEDUPLICACIÓN
+// ============================================
+
+/** GET /tienda/config.js — el ID del píxel es público; nunca se expone el token. */
+app.get('/tienda/config.js', (req, res) => {
+  res.type('application/javascript').set('Cache-Control', 'no-store')
+    .send(`window.TOMCAT = ${JSON.stringify({ pixelId: webPixelId, whatsapp: '50488447759' })};`);
+});
+
+app.get('/tienda', (req, res) => res.sendFile(path.join(__dirname, 'public', 'tienda.html')));
+
+// Límite sencillo por IP para el endpoint público de eventos web
+const webHits = new Map();
+function webRateOk(ip) {
+  const now = Date.now();
+  const h = webHits.get(ip) || { n: 0, t: now };
+  if (now - h.t > 60000) { h.n = 0; h.t = now; }
+  h.n += 1; webHits.set(ip, h);
+  if (webHits.size > 5000) webHits.clear();
+  return h.n <= 30;
+}
+
+/**
+ * POST /capi/web  { event, eventId, url, fbp, fbc, content }
+ * El navegador dispara el píxel con eventID y llama aquí con el mismo id:
+ * Meta recibe el evento dos veces y lo cuenta una (deduplicación por event_id + event_name).
+ * Solo PageView, ViewContent y Contact: la compra se registra cuando el pedido se confirma.
+ */
+app.post('/capi/web', async (req, res) => {
+  const ip = String(req.headers['x-forwarded-for'] || req.socket.remoteAddress || '').split(',')[0].trim();
+  if (!webRateOk(ip)) return res.status(429).json({ ok: false });
+  const b = req.body || {};
+  if (!['PageView', 'ViewContent', 'Contact'].includes(b.event)) return res.status(400).json({ ok: false, error: 'event' });
+  const content = b.content ? String(b.content).slice(0, 60) : undefined;
+  const r = await capi.sendWebEvent(b.event, {
+    eventId: b.eventId, eventSourceUrl: b.url, clientIp: ip, userAgent: req.headers['user-agent'],
+    fbp: b.fbp, fbc: b.fbc,
+    customData: content ? { content_name: content, content_category: content, content_type: 'product' } : undefined
+  });
+  res.status(r.ok ? 200 : 202).json({ ok: Boolean(r.ok) });
 });
 
 /**
@@ -1098,13 +1183,16 @@ app.post('/sales/manual', async (req, res) => {
   if (!isAdminAuthorized(req)) {
     return res.status(401).json({ ok: false, error: 'unauthorized' });
   }
-  const { phone, value } = req.body || {};
+  const { phone, value, brand, product, orderId } = req.body || {};
   const digits = String(phone || '').replace(/\D/g, '');
   if (digits.length < 8) return res.status(400).json({ ok: false, error: 'telefono_invalido' });
   const amount = parseAmount(String(value || '').replace(/[^0-9.,]/g, ''));
   if (!amount || amount > 200000) return res.status(400).json({ ok: false, error: 'monto_invalido' });
   const saleId = `manual_${capi.normalizePhone(digits)}_${Math.round(amount * 100)}_${new Date().toISOString().slice(0, 10)}`;
-  const result = await leads.recordSale(digits, amount, saleId, { source: 'manual' });
+  const clip = (v, n) => (v ? String(v).replace(/[<>]/g, '').trim().slice(0, n) || undefined : undefined);
+  const result = await leads.recordSale(digits, amount, saleId, {
+    source: 'manual', brand: clip(brand, 60), product: clip(product, 120), orderId: clip(orderId, 30)
+  });
   res.status(result.ok ? 200 : 400).json(result);
 });
 
