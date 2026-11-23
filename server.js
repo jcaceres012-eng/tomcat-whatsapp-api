@@ -1159,18 +1159,44 @@ function webRateOk(ip) {
  * POST /capi/web  { event, eventId, url, fbp, fbc, content }
  * El navegador dispara el píxel con eventID y llama aquí con el mismo id:
  * Meta recibe el evento dos veces y lo cuenta una (deduplicación por event_id + event_name).
- * Solo PageView, ViewContent y Contact: la compra se registra cuando el pedido se confirma.
+ * Eventos del sitio: PageView, ViewContent, Contact, AddToCart, InitiateCheckout y Search.
+ * La compra NO se acepta desde el navegador: se registra cuando el pedido se confirma por WhatsApp.
+ * CORS: solo el sitio propio (tomcatstorehn.com, ahora en Hostinger) y esta misma app.
  */
+const WEB_ORIGINS = new Set(['https://tomcatstorehn.com', 'https://www.tomcatstorehn.com',
+  ...String(process.env.WEB_ALLOWED_ORIGINS || '').split(',').map(s => s.trim()).filter(Boolean)]);
+const WEB_ALLOWED = new Set(['PageView', 'ViewContent', 'Contact', 'AddToCart', 'InitiateCheckout', 'Search']);
+function webCors(req, res) {
+  const o = req.headers.origin;
+  if (o && WEB_ORIGINS.has(o)) {
+    res.set('Access-Control-Allow-Origin', o);
+    res.set('Vary', 'Origin');
+    res.set('Access-Control-Allow-Methods', 'POST, OPTIONS');
+    res.set('Access-Control-Allow-Headers', 'Content-Type');
+    res.set('Access-Control-Max-Age', '86400');
+  }
+}
+app.options('/capi/web', (req, res) => { webCors(req, res); res.sendStatus(204); });
 app.post('/capi/web', async (req, res) => {
+  webCors(req, res);
   const ip = String(req.headers['x-forwarded-for'] || req.socket.remoteAddress || '').split(',')[0].trim();
   if (!webRateOk(ip)) return res.status(429).json({ ok: false });
   const b = req.body || {};
-  if (!['PageView', 'ViewContent', 'Contact'].includes(b.event)) return res.status(400).json({ ok: false, error: 'event' });
-  const content = b.content ? String(b.content).slice(0, 60) : undefined;
+  if (!WEB_ALLOWED.has(b.event)) return res.status(400).json({ ok: false, error: 'event' });
+  const content = b.content ? String(b.content).slice(0, 120) : undefined;
+  const d = (b.data && typeof b.data === 'object') ? b.data : {};
+  const custom = {};
+  if (content) { custom.content_name = content; custom.content_type = 'product'; }
+  if (d.content_name) custom.content_name = String(d.content_name).slice(0, 120);
+  if (d.content_category) custom.content_category = String(d.content_category).slice(0, 60);
+  if (Array.isArray(d.content_ids)) { custom.content_ids = d.content_ids.slice(0, 10).map(x => String(x).slice(0, 40)); custom.content_type = 'product'; }
+  const val = Number(d.value);
+  if (Number.isFinite(val) && val > 0 && val <= 200000) { custom.value = Math.round(val * 100) / 100; custom.currency = 'HNL'; }
+  if (Number.isFinite(Number(d.num_items))) custom.num_items = Math.min(50, Math.max(0, Number(d.num_items)));
   const r = await capi.sendWebEvent(b.event, {
     eventId: b.eventId, eventSourceUrl: b.url, clientIp: ip, userAgent: req.headers['user-agent'],
     fbp: b.fbp, fbc: b.fbc,
-    customData: content ? { content_name: content, content_category: content, content_type: 'product' } : undefined
+    customData: Object.keys(custom).length ? custom : undefined
   });
   res.status(r.ok ? 200 : 202).json({ ok: Boolean(r.ok) });
 });
