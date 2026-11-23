@@ -34,7 +34,7 @@ function normalizePhone(phone) {
 }
 
 // Eventos del sitio web que acepta el píxel / CAPI web
-const WEB_EVENTS = new Set(['PageView', 'ViewContent', 'Contact', 'Lead', 'InitiateCheckout', 'Purchase']);
+const WEB_EVENTS = new Set(['PageView', 'ViewContent', 'Contact', 'Lead', 'AddToCart', 'InitiateCheckout', 'Search', 'Purchase']);
 
 function sha256(value) {
   return crypto.createHash('sha256').update(String(value).trim().toLowerCase()).digest('hex');
@@ -61,6 +61,7 @@ function cleanCustom(c) {
   if (Array.isArray(c.contents)) out.contents = c.contents.slice(0, 20).map(x => ({ id: String(x.id).slice(0, 100), quantity: Number(x.quantity) || 1 }));
   if (c.currency) out.currency = String(c.currency).slice(0, 3);
   if (c.value !== undefined && Number.isFinite(Number(c.value))) out.value = Number(c.value);
+  if (Number.isFinite(Number(c.num_items)) && c.num_items !== undefined) out.num_items = Number(c.num_items);
   if (c.lead_event_source) out.lead_event_source = String(c.lead_event_source).slice(0, 50);
   return out;
 }
